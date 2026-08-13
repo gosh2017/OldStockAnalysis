@@ -13,7 +13,15 @@
   8. 绘制估值走势图
 """
 import argparse
+import io
+import sys
 from datetime import datetime
+
+# Force UTF-8 stdout on Windows (avoids GBK encoding errors with Chinese/emoji)
+try:
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
+except Exception:
+    pass
 
 from config import STOCK_CODE, STOCK_NAME
 from utils import sep
@@ -24,6 +32,7 @@ from data import (
     fetch_dividend,
     fetch_market_overview,
     fetch_bond_yield_10y,
+    generate_all_demo_data,
 )
 from analysis import (
     fundamental_screening,
@@ -34,40 +43,51 @@ from analysis import (
 from visualization import plot_valuation_chart
 
 
-def main(symbol: str = STOCK_CODE, stock_name: str = STOCK_NAME) -> None:
-    print(f"\n{'━' * 70}")
+def main(symbol: str = STOCK_CODE, stock_name: str = STOCK_NAME,
+         demo: bool = False) -> None:
+    print(f"\n{'=' * 70}")
     print(f"  量化价值投资分析系统")
     print(f"  标的: {stock_name}（{symbol}）")
+    if demo:
+        print(f"  [!] DEMO MODE (offline mock data)")
     print(f"  分析日期: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
-    print(f"{'━' * 70}")
+    print(f"{'=' * 70}")
 
-    # ── 1. 获取数据 ──
-    daily_df     = fetch_daily_data(symbol)
-    fin_abstract = fetch_financial_abstract(symbol)
-    cashflow_df  = fetch_cashflow_detail(symbol)
-    dividend_df  = fetch_dividend(symbol)
+    # -- 1. 获取数据 --
+    if demo:
+        print("\n[INFO] 使用模拟数据（--demo 模式），跳过网络请求...")
+        demo_data = generate_all_demo_data()
+        daily_df    = demo_data["daily_df"]
+        fin_abstract = demo_data["fin_abstract"]
+        cashflow_df = demo_data["cashflow_df"]
+        dividend_df = demo_data["dividend_df"]
+        market_df   = demo_data["market_df"]
+        bond_yield  = demo_data["bond_yield"]
+    else:
+        daily_df     = fetch_daily_data(symbol)
+        fin_abstract = fetch_financial_abstract(symbol)
+        cashflow_df  = fetch_cashflow_detail(symbol)
+        dividend_df  = fetch_dividend(symbol)
+        market_df    = fetch_market_overview()
+        bond_yield   = fetch_bond_yield_10y()
 
-    # ── 2. Step 1：基本面筛选 ──
+    # -- 2. Step 1：基本面筛选 --
     screening = fundamental_screening(symbol, fin_abstract, daily_df, dividend_df)
 
-    # ── 3. Step 2：DCF 估值 ──
+    # -- 3. Step 2：DCF 估值 --
     dcf_result = dcf_valuation(symbol, fin_abstract, cashflow_df, daily_df)
 
-    # ── 4. 市场数据 ──
-    market_df  = fetch_market_overview()
-    bond_yield = fetch_bond_yield_10y()
-
-    # ── 5. Step 3：市场情绪 ──
+    # -- 4. Step 3：市场情绪 --
     sentiment = market_sentiment(market_df, bond_yield)
 
-    # ── 6. Step 4：综合建议 ──
+    # -- 5. Step 4：综合建议 --
     advice = investment_advice(daily_df, dcf_result, sentiment, screening)
 
-    # ── 7. 图表 ──
+    # -- 6. 图表 --
     if dcf_result.get("valuations"):
         plot_valuation_chart(daily_df, dcf_result["valuations"], sentiment, dcf_result)
 
-    # ── 最终摘要 ──
+    # -- 最终摘要 --
     _print_summary(symbol, stock_name, advice)
 
 
@@ -89,19 +109,19 @@ def _print_summary(symbol: str, stock_name: str, advice: dict) -> None:
     opt_str   = f"{optimistic:.2f}" if optimistic else "N/A"
 
     print(f"""
-  ┌─────────────────────────────────────────────────────┐
-  │  标的            │ {stock_name}（{symbol}）               │
-  │  当前股价        │ {price_str:>8} 元          │
-  │  ────────────────────────────────────────             │
-  │  保守估值        │ {cons_str:>8} 元          │
-  │  中性估值        │ {neu_str:>8} 元          │
-  │  乐观估值        │ {opt_str:>8} 元          │
-  │  ────────────────────────────────────────             │
-  │  基本面筛选      │ {'通过' if screened else '未通过':>20}       │
-  │  市场情绪        │ {str(sentiment):>20}     │
-  │  ────────────────────────────────────────             │
-  │  ★ 操作建议      │ {str(recommendation):>20}      │
-  └─────────────────────────────────────────────────────┘
+  +-----------------------------------------------------+
+  |  标的            | {stock_name}（{symbol}）               |
+  |  当前股价        | {price_str:>8} 元          |
+  |  ----------------------------------------             |
+  |  保守估值        | {cons_str:>8} 元          |
+  |  中性估值        | {neu_str:>8} 元          |
+  |  乐观估值        | {opt_str:>8} 元          |
+  |  ----------------------------------------             |
+  |  基本面筛选      | {'通过' if screened else '未通过':>20}       |
+  |  市场情绪        | {str(sentiment):>20}     |
+  |  ----------------------------------------             |
+  |  ★ 操作建议      | {str(recommendation):>20}      |
+  +-----------------------------------------------------+
 """)
 
     if recommendation:
@@ -123,8 +143,12 @@ def _cli():
         "-n", "--name", default=STOCK_NAME,
         help="股票名称（用于图表标题）",
     )
+    parser.add_argument(
+        "--demo", action="store_true",
+        help="使用模拟数据离线运行（无需网络连接）",
+    )
     args = parser.parse_args()
-    main(symbol=args.symbol, stock_name=args.name)
+    main(symbol=args.symbol, stock_name=args.name, demo=args.demo)
 
 
 if __name__ == "__main__":

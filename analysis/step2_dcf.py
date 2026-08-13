@@ -3,7 +3,7 @@
 第二步：估值锚定 — 自由现金流折现模型（DCF）
 
 基期 FCF = 过去 5 年平均自由现金流
-自由现金流 = 经营性现金流净额 − 资本性支出
+自由现金流 = 经营性现金流净额 - 资本性支出
 
 三情景参数（来自 config.SCENARIOS）：
   保守 / 中性 / 乐观
@@ -28,7 +28,7 @@ def dcf_valuation(
 
     years = list(range(FIN_START, FIN_END + 1))
 
-    # ── 提取经营性现金流 ──
+    # -- 提取经营性现金流 --
     ocf_values = {}
     capex_values = {}
 
@@ -47,7 +47,7 @@ def dcf_valuation(
                     except (ValueError, TypeError):
                         pass
 
-    # ── 提取资本性支出 ──
+    # -- 提取资本性支出 --
     if cashflow_df is not None and not cashflow_df.empty:
         date_col_cf = find_col_in(["报告期", "报告日期", "report"], cashflow_df)
         capex_col   = find_col_in(["购建固定资产", "资本性支出", "购建长期资产"], cashflow_df)
@@ -63,11 +63,11 @@ def dcf_valuation(
                     except (ValueError, TypeError):
                         pass
 
-    # ── 计算 FCF ──
-    print(f"\n  📊 各年现金流数据（单位：亿元）\n")
+    # -- 计算 FCF --
+    print(f"\n  [DATA] 各年现金流数据（单位：亿元）\n")
     fcf_values = {}
     print(f"  {'年份':>6s}  {'经营现金流':>12s}  {'资本性支出':>12s}  {'自由现金流':>12s}")
-    print(f"  {'─' * 52}")
+    print(f"  {'-' * 52}")
 
     for year in years:
         ocf = ocf_values.get(year, 0)
@@ -78,24 +78,24 @@ def dcf_valuation(
         fcf_values[year] = fcf
         print(f"  {year:>6d}  {ocf / 1e8:>12.1f}  {capex / 1e8:>12.1f}  {fcf / 1e8:>12.1f}")
 
-    # ── 基期 FCF ──
+    # -- 基期 FCF --
     fcf_list = [v for v in fcf_values.values() if v is not None and v > 0]
     if not fcf_list:
-        print("\n  ✗ 无法计算有效 FCF，跳过 DCF 估值。")
+        print("\n  [X] 无法计算有效 FCF，跳过 DCF 估值。")
         return {"valuations": None, "base_fcf": None, "total_shares": None,
                 "conservative": None, "neutral": None, "optimistic": None}
 
     base_fcf = np.mean(fcf_list)
-    print(f"\n  📌 基期 FCF（5 年平均）: {base_fcf / 1e8:.1f} 亿元")
+    print(f"\n  [PIN] 基期 FCF（5 年平均）: {base_fcf / 1e8:.1f} 亿元")
 
-    # ── 总股本 ──
+    # -- 总股本 --
     total_shares = _get_total_shares(symbol, fin_abstract, daily_df)
-    print(f"  📌 总股本: {total_shares / 1e8:.2f} 亿股")
+    print(f"  [PIN] 总股本: {total_shares / 1e8:.2f} 亿股")
 
-    # ── 三情景 DCF ──
-    print(f"\n  📊 DCF 三情景估值结果\n")
+    # -- 三情景 DCF --
+    print(f"\n  [DATA] DCF 三情景估值结果\n")
     print(f"  {'情景':>20s}  {'增长率':>8s}  {'永续增长':>8s}  {'WACC':>8s}  {'内在价值':>10s}")
-    print(f"  {'─' * 66}")
+    print(f"  {'-' * 66}")
 
     valuations = {}
     for scenario_name, params in SCENARIOS.items():
@@ -127,11 +127,11 @@ def dcf_valuation(
     neutral      = valuations["中性 (Neutral)"]["intrinsic_value"]
     optimistic   = valuations["乐观 (Optimistic)"]["intrinsic_value"]
 
-    print(f"\n  ── 每股内在价值估值区间 ──")
-    print(f"  🔴 保守估值: {conservative:.2f} 元")
-    print(f"  🟡 中性估值: {neutral:.2f} 元")
-    print(f"  🟢 乐观估值: {optimistic:.2f} 元")
-    print(f"  📏 估值区间: [{conservative:.2f}, {optimistic:.2f}] 元")
+    print(f"\n  -- 每股内在价值估值区间 --")
+    print(f"  [RED] 保守估值: {conservative:.2f} 元")
+    print(f"  [YLW] 中性估值: {neutral:.2f} 元")
+    print(f"  [GRN] 乐观估值: {optimistic:.2f} 元")
+    print(f"  [RULER] 估值区间: [{conservative:.2f}, {optimistic:.2f}] 元")
 
     return {
         "valuations": valuations,
@@ -159,5 +159,5 @@ def _get_total_shares(symbol: str, fin_abstract: pd.DataFrame,
 
     # 平安银行总股本约 197.56 亿股
     total = 197.56e8
-    print(f"  ⚠ 使用估算总股本: {total / 1e8:.0f} 亿股")
+    print(f"  [!] 使用估算总股本: {total / 1e8:.0f} 亿股")
     return total

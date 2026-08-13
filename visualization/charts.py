@@ -29,7 +29,7 @@ def plot_valuation_chart(
 ) -> None:
     """绘制并保存估值走势图（matplotlib 静态图 + plotly 交互图）。"""
     if daily_df.empty or valuations is None:
-        print("\n⚠ 数据不足，跳过图表绘制。")
+        print("\n[!] 数据不足，跳过图表绘制。")
         return
 
     os.makedirs(CHART_DIR, exist_ok=True)
@@ -102,7 +102,7 @@ def _plot_matplotlib(daily_df, conservative, neutral, optimistic, sentiment_resu
     chart_path = f"{CHART_DIR}/valuation_{STOCK_CODE}.png"
     plt.savefig(chart_path, dpi=150, bbox_inches="tight")
     plt.close()
-    print(f"\n  ✓ 图表已保存: {chart_path}")
+    print(f"\n  [OK] 图表已保存: {chart_path}")
 
 
 def _plot_interactive(daily_df, conservative, neutral, optimistic, sentiment_result):
@@ -134,4 +134,4 @@ def _plot_interactive(daily_df, conservative, neutral, optimistic, sentiment_res
 
     plotly_path = f"{CHART_DIR}/valuation_{STOCK_CODE}.html"
     fig.write_html(plotly_path)
-    print(f"  ✓ 交互式图表已保存: {plotly_path}")
+    print(f"  [OK] 交互式图表已保存: {plotly_path}")

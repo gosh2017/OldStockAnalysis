@@ -48,6 +48,9 @@ python main.py
 
 # 3. 指定其他股票
 python main.py 600519 -n 贵州茅台
+
+# 4. 离线演示模式（无需网络，使用模拟数据）
+python main.py --demo
 ```
 
 ## 配置

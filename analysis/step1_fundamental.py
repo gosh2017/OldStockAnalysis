@@ -3,10 +3,10 @@
 第一步：基本面筛选（质量评估）
 
 计算过去 5 年（FIN_START ~ FIN_END）每年的核心财务指标：
-  • ROE（加权净资产收益率）
-  • 股息率（TTM）
-  • 资产负债率
-  • 经营性现金流净额 / 净利润（利润质量）
+  - ROE（加权净资产收益率）
+  - 股息率（TTM）
+  - 资产负债率
+  - 经营性现金流净额 / 净利润（利润质量）
 
 判断标准：
   连续 5 年 ROE > 15% 且 股息率 > 2% → "初步通过筛选"
@@ -31,10 +31,10 @@ def fundamental_screening(
     results = []
 
     if fin_abstract is None or fin_abstract.empty:
-        print("  ✗ 财务数据不可用，跳过基本面分析。")
+        print("  [X] 财务数据不可用，跳过基本面分析。")
         return {"screened": False, "table": None, "roe_pass": False, "div_pass": False}
 
-    # ── 识别关键列名 ──
+    # -- 识别关键列名 --
     date_col   = find_col_in(["报告日期", "报告期", "report"], fin_abstract)
     roe_col    = find_col_in(["加权净资产收益率", "ROE", "净资产收益率"], fin_abstract)
     debt_col   = find_col_in(["资产负债率"], fin_abstract)
@@ -42,19 +42,19 @@ def fundamental_screening(
     np_col     = find_col_in(["净利润", "归属于上市公司股东的净利润"], fin_abstract)
     equity_col = find_col_in(["归属母公司股东权益", "所有者权益合计"], fin_abstract)
 
-    # ── 提取年度数据 ──
+    # -- 提取年度数据 --
     if date_col:
         fin_abstract[date_col] = pd.to_datetime(fin_abstract[date_col], errors="coerce")
         fin_abstract["年份"] = fin_abstract[date_col].dt.year
         annual = fin_abstract[fin_abstract["年份"].isin(years)].copy()
         if annual.empty:
-            print("  ⚠ 未找到指定年份范围的财务数据。")
+            print("  [!] 未找到指定年份范围的财务数据。")
             return {"screened": False, "table": None, "roe_pass": False, "div_pass": False}
     else:
-        print("  ✗ 无法识别报告日期列。")
+        print("  [X] 无法识别报告日期列。")
         return {"screened": False, "table": None, "roe_pass": False, "div_pass": False}
 
-    # ── 构建每年核心指标表 ──
+    # -- 构建每年核心指标表 --
     for year in years:
         year_data = annual[annual["年份"] == year]
         if year_data.empty:
@@ -94,32 +94,32 @@ def fundamental_screening(
             "股息率(%)": round(div_yield, 2) if div_yield else None,
         })
 
-    # ── 打印结果 ──
+    # -- 打印结果 --
     result_df = pd.DataFrame(results)
-    print(f"\n  📊 {symbol} 过去 {FIN_END - FIN_START + 1} 年核心财务指标\n")
+    print(f"\n  [DATA] {symbol} 过去 {FIN_END - FIN_START + 1} 年核心财务指标\n")
     print(result_df.to_string(index=False))
 
-    # ── 判断是否通过筛选 ──
+    # -- 判断是否通过筛选 --
     roe_series = result_df["ROE(%)"].dropna()
     div_series = result_df["股息率(%)"].dropna()
 
     roe_pass = len(roe_series) >= 3 and (roe_series > 15).all()
     div_pass = len(div_series) >= 3 and (div_series > 2).all()
 
-    print(f"\n  ── 筛选判断 ──")
+    print(f"\n  -- 筛选判断 --")
     if len(roe_series) > 0:
-        print(f"  • ROE 连续 > 15%：{'✅ 通过' if roe_pass else '❌ 未通过'}"
+        print(f"  - ROE 连续 > 15%：{'[PASS] 通过' if roe_pass else '[FAIL] 未通过'}"
               f"  (ROE 范围: {roe_series.min():.1f}% ~ {roe_series.max():.1f}%)")
     else:
-        print("  • ROE 数据不足")
+        print("  - ROE 数据不足")
     if len(div_series) > 0:
-        print(f"  • 股息率 > 2%：{'✅ 通过' if div_pass else '❌ 未通过'}"
+        print(f"  - 股息率 > 2%：{'[PASS] 通过' if div_pass else '[FAIL] 未通过'}"
               f"  (股息率范围: {div_series.min():.1f}% ~ {div_series.max():.1f}%)")
     else:
-        print("  • 股息率数据不足")
+        print("  - 股息率数据不足")
 
     screened = roe_pass and div_pass
-    print(f"\n  🏷  筛选结论：{'【初步通过筛选】' if screened else '【不满足长线价值投资标准】'}")
+    print(f"\n  [TAG]  筛选结论：{'【初步通过筛选】' if screened else '【不满足长线价值投资标准】'}")
 
     return {
         "screened": screened,

@@ -10,6 +10,7 @@ from .fetcher import (
     fetch_market_overview,
     fetch_bond_yield_10y,
 )
+from .demo_data import generate_all_demo_data
 
 __all__ = [
     "fetch_daily_data",
@@ -18,4 +19,5 @@ __all__ = [
     "fetch_dividend",
     "fetch_market_overview",
     "fetch_bond_yield_10y",
+    "generate_all_demo_data",
 ]
