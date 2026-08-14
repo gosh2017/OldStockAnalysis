@@ -182,6 +182,34 @@ def _find_div_per_share_col(div_data: pd.DataFrame) -> str | None:
     return None
 
 
+def _normalize_div_per_share(eps_div_col: str, raw_val: float) -> float:
+    """
+    将分红金额标准化为每股金额。
+
+    AkShare stock_history_dividend_detail 的"派息"列存储的是每10股金额
+    (例如 3.62 表示每10股派3.62元 = 0.362元/股)，需要除以 10。
+    stock_dividend_cninfo 等其他接口可能直接存储每股金额。
+
+    判断规则：
+      - 列名含"每股" → 已为每股金额，直接用
+      - 列名含"10股" → 每10股金额，除以 10
+      - 列名为"派息"（stock_history_dividend_detail 默认）→ 每10股金额，除以 10
+      - 其他含"派"/"股息"的列 → 若值 > 1 且列名不含"每股"，视为每10股金额
+    """
+    col = str(eps_div_col)
+    if "每股" in col:
+        return raw_val
+    if "10股" in col:
+        return raw_val / 10.0
+    # stock_history_dividend_detail 的"派息"列 = 每10股金额
+    if col == "派息":
+        return raw_val / 10.0
+    # 兜底：若列名含分红相关词但不含"每股"，且数值偏大(>1)，视为每10股
+    if ("派" in col or "股息" in col) and raw_val > 1:
+        return raw_val / 10.0
+    return raw_val
+
+
 def estimate_dividend_yield(
     year: int, row, equity_col: str,
     dividend_df: pd.DataFrame,
@@ -189,10 +217,16 @@ def estimate_dividend_yield(
     roe_col: str, np_col: str,
 ) -> float:
     """
-    估算某年的股息率。
+    估算某年(财报年份)的股息率。
+
     方案 1：从分红记录中提取实际分红金额 / 年末股价。
     方案 2：用 ROE x 30%（A 股银行典型分红比例）近似。
     方案 3：用净利润 x 30% / 隐含市值 近似。
+
+    分红数据时间对应：
+      stock_history_dividend_detail 的"公告日期"为分红方案公告时间，
+      通常发生在财报年度的次年。例如 2024-06-06 公告的分红是 FY2023 分红。
+      因此匹配规则：公告年份 = year + 1。
     """
     # 方案 1：分红记录
     if dividend_df is not None and not dividend_df.empty:
@@ -207,18 +241,18 @@ def estimate_dividend_yield(
 
             if date_col and eps_div_col:
                 div_data[date_col] = pd.to_datetime(div_data[date_col], errors="coerce")
-                div_data["年份"] = div_data[date_col].dt.year
-                year_div = div_data[div_data["年份"] == year]
-                if not year_div.empty:
-                    raw_val = year_div[eps_div_col].iloc[0]
-                    try:
-                        div_per_share = float(raw_val)
-                    except (ValueError, TypeError):
-                        div_per_share = 0.0
+                div_data["公告年份"] = div_data[date_col].dt.year
 
-                    # "每10股派息"格式需要除以 10
-                    if "10股" in eps_div_col and div_per_share > 10:
-                        div_per_share = div_per_share / 10.0
+                # 公告日期在年报发布前通常发生在次年：公告年份 = year + 1
+                target_year = year + 1
+                year_div = div_data[div_data["公告年份"] == target_year]
+                if not year_div.empty:
+                    # 若同一年有多笔分红（如中期+年度），取最大的一笔（主分红）
+                    raw_vals = pd.to_numeric(year_div[eps_div_col], errors="coerce").dropna()
+                    if raw_vals.empty:
+                        raw_vals = [0.0]
+                    raw_val = raw_vals.max()
+                    div_per_share = _normalize_div_per_share(eps_div_col, raw_val)
 
                     if div_per_share > 0:
                         if not daily_df.empty and "日期" in daily_df.columns:
