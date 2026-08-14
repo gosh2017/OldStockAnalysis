@@ -145,7 +145,31 @@ def dcf_valuation(
 
 def _get_total_shares(symbol: str, fin_abstract: pd.DataFrame,
                       daily_df: pd.DataFrame) -> float:
-    """获取总股本，优先从财务数据，失败则用估算值。"""
+    """获取总股本。优先级：日频数据 > 财务摘要 > 估算值。
+    新浪 daily 接口含 outstanding_share 字段，优先使用。
+    """
+    # 1. 从日频数据获取
+    if daily_df is not None and not daily_df.empty:
+        for col in ["outstanding_share", "总股本", "total_share", "total_shares"]:
+            if col in daily_df.columns:
+                val = pd.to_numeric(daily_df[col], errors="coerce").dropna()
+                if len(val) > 0:
+                    total = float(val.iloc[-1])
+                    if total > 0:
+                        return total
+        # 检查 总股本(万) 等带单位的列
+        share_col = find_col_in(["总股本", "股份总数", "total_share"], daily_df)
+        if share_col:
+            val = pd.to_numeric(daily_df[share_col], errors="coerce").dropna()
+            if len(val) > 0:
+                total = float(val.iloc[-1])
+                if total > 0:
+                    # 单位转换：若数值 < 10万（即 < 10e4），可能是万股
+                    if total < 1e4:
+                        total *= 1e4
+                    return total
+
+    # 2. 从财务摘要获取
     if fin_abstract is not None and not fin_abstract.empty:
         share_col = find_col_in(["总股本", "股份总数", "total_share"], fin_abstract)
         if share_col:
@@ -157,7 +181,7 @@ def _get_total_shares(symbol: str, fin_abstract: pd.DataFrame,
             except Exception:
                 pass
 
-    # 平安银行总股本约 197.56 亿股
+    # 3. 平安银行总股本约 197.56 亿股
     total = 197.56e8
     print(f"  [!] 使用估算总股本: {total / 1e8:.0f} 亿股")
     return total

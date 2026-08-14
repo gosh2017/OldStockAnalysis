@@ -43,7 +43,14 @@ def fetch_daily_data(symbol: str = STOCK_CODE) -> pd.DataFrame:
     """
     print(f"\n[INFO] 正在获取 {symbol} 的日频交易数据（{START_DATE} ~ {END_DATE}）...")
 
+    # 策略顺序：新浪优先（多数网络环境可用），东方财富次之
     strategies = [
+        # stock_zh_a_daily: 新浪端点，symbol 需带交易所前缀，日期格式 YYYYMMDD
+        ("stock_zh_a_daily", {
+            "symbol": _prefix_symbol(symbol),
+            "start_date": START_DATE, "end_date": END_DATE,
+        }),
+        # stock_zh_a_hist: 东方财富端点（部分网络环境不可达）
         ("stock_zh_a_hist", {
             "symbol": symbol, "period": "daily",
             "start_date": START_DATE, "end_date": END_DATE, "adjust": "qfq",
@@ -98,6 +105,17 @@ def _normalize_daily_df(df: pd.DataFrame) -> pd.DataFrame:
         df["日期"] = pd.to_datetime(df["日期"])
     df = df.sort_values("日期").reset_index(drop=True)
     return df
+
+
+def _total_shares_from_daily(daily_df: pd.DataFrame) -> float | None:
+    """从日频数据的 outstanding_share 列获取总股本。
+    新浪接口返回的 daily 数据含此字段，优先使用。"""
+    for col in ["outstanding_share", "总股本", "total_share", "total_shares"]:
+        if col in daily_df.columns:
+            val = pd.to_numeric(daily_df[col], errors="coerce").dropna()
+            if len(val) > 0:
+                return float(val.iloc[-1])
+    return None
 
 
 def _extract_financial_indicator(df, indicator_patterns: list) -> pd.Series | None:
@@ -242,12 +260,27 @@ def fetch_dividend(symbol: str = STOCK_CODE) -> pd.DataFrame:
 def fetch_market_overview() -> pd.DataFrame | None:
     """
     获取全市场 A 股实时数据（用于计算市盈率中位数）。
+    策略 1: stock_zh_a_spot_em（东方财富，含市盈率-动态列）
+    策略 2: stock_zh_a_spot（新浪，无市盈率列但可获取部分数据）
     """
     print(f"\n[INFO] 正在获取全市场 A 股实时数据...")
-    df = try_fetch(ak.stock_zh_a_spot_em)
-    if df is not None and not df.empty:
-        print(f"  [OK] 全市场数据: {len(df)} 只股票")
-        return df
+
+    strategies = [
+        "stock_zh_a_spot_em",   # 东方财富，含 PE 列
+        "stock_zh_a_spot",      # 新浪，无 PE 列
+    ]
+
+    for func_name in strategies:
+        fn = getattr(ak, func_name, None)
+        if fn is None:
+            print(f"  [!] {func_name} 不可用，跳过")
+            continue
+        df = try_fetch(fn)
+        if df is not None and not df.empty:
+            has_pe = any("市盈率" in str(c) or "PE" in str(c).upper() for c in df.columns)
+            print(f"  [OK] {func_name}: {len(df)} 只股票" + ("（含 PE）" if has_pe else "（无 PE）"))
+            return df
+
     print("  [X] 未能获取全市场数据。")
     return None
 
