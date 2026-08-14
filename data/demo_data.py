@@ -137,20 +137,25 @@ def generate_dividend(
     seed: int = 45,
 ) -> pd.DataFrame:
     """
-    生成分红记录数据。
-    平安银行近年每股分红约 0.40-0.50 元。
+    生成分红记录数据，列名匹配 stock_history_dividend_detail 的输出。
+    平安银行近年每股分红约 0.40-0.50 元（派息列直接存每股金额）。
     """
     np.random.seed(seed)
     years = list(range(start_year, end_year + 1))
     rows = []
     for year in years:
         div_per_share = 0.40 + np.random.uniform(-0.03, 0.07)
-        # 分红公告日期一般在次年 7-8 月
-        month = np.random.randint(7, 9)
+        month = np.random.randint(6, 9)
         day = np.random.randint(5, 25)
         rows.append({
             "公告日期": pd.Timestamp(f"{year + 1}-{month:02d}-{day:02d}"),
-            "每股分红(元)": round(div_per_share, 4),
+            "送股": 0,
+            "转增": 0,
+            "派息": round(div_per_share, 4),
+            "配股": 0,
+            "除权除息日": pd.Timestamp(f"{year + 1}-{month:02d}-{day + 5:02d}"),
+            "除权除息基准日": pd.Timestamp(f"{year + 1}-{month:02d}-{day + 4:02d}"),
+            "权益分派进度": "实施",
         })
     return pd.DataFrame(rows)
 
