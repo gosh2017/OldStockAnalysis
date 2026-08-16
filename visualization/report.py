@@ -50,11 +50,34 @@ def _dcf_table(dcf: dict) -> str:
         v = dcf["valuations"][name]
         rows.append({
             "情景": name,
-            "增长率": f"{p['growth']:.0%}",
-            "永续增长": f"{p['perpetual']:.0%}",
-            "WACC": f"{p['wacc']:.0%}",
+            "增长率": f"{p['growth']:.1%}",
+            "永续增长": f"{p['perpetual']:.1%}",
+            "WACC": f"{p['wacc']:.1%}",
             "每股内在价值(元)": f"{v['intrinsic_value']:.2f}",
         })
+    return _df_to_html(pd.DataFrame(rows))
+
+
+def _anchor_cap_table(dcf: dict) -> str:
+    """合理估值上限锚定表：PE中位 × EPS 与 中性DCF 取小。"""
+    if not dcf or dcf.get("fair_value_ceiling") is None:
+        return ""
+    rows = [{
+        "项目": "过去5年PE中位数",
+        "值": f"{dcf.get('pe_median_5y'):.2f}" if dcf.get('pe_median_5y') else "N/A",
+    }, {
+        "项目": "当前EPS(元)",
+        "值": f"{dcf.get('current_eps'):.2f}" if dcf.get('current_eps') else "N/A",
+    }, {
+        "项目": "PE锚定值(元)",
+        "值": f"{dcf.get('pe_anchor_value'):.2f}" if dcf.get('pe_anchor_value') else "N/A",
+    }, {
+        "项目": "中性DCF(元)",
+        "值": f"{dcf.get('neutral_raw'):.2f}" if dcf.get('neutral_raw') else "N/A",
+    }, {
+        "项目": "合理估值上限(元)",
+        "值": f"{dcf.get('fair_value_ceiling'):.2f}",
+    }]
     return _df_to_html(pd.DataFrame(rows))
 
 
@@ -123,6 +146,7 @@ def render_html_report(ctx, daily_df, screening, dcf, sensitivity,
     # 各表
     fund_html = _df_to_html((screening or {}).get("table"))
     dcf_html = _dcf_table(dcf)
+    anchor_html = _anchor_cap_table(dcf)
     sens_html = _df_to_html((sensitivity or {}).get("grid"), index=True)
     score_html = _score_table(score)
 
@@ -174,11 +198,13 @@ def render_html_report(ctx, daily_df, screening, dcf, sensitivity,
       <h2>三、DCF 三情景估值</h2>
       {dcf_html}
       <p style="font-size:12px;color:#666;margin-top:8px">基期 FCF：{(dcf or {}).get('base_fcf', 0)/1e8:.1f} 亿元 · 总股本：{(dcf or {}).get('total_shares', 0)/1e8:.2f} 亿股</p>
+      {anchor_html}
     </div>
   </div>
 
   <div class="section">
     <h2>四、DCF 敏感性（每股内在价值，元）</h2>
+    <p style="font-size:12px;color:#666;margin-bottom:8px">行 = 永续增长率，列 = 折现率 WACC</p>
     {sens_html}
   </div>
 

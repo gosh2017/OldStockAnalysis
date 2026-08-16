@@ -22,7 +22,8 @@ def test_grade_bands():
 
 def _run_pipeline(ctx, fin_abstract, cashflow_df, daily_df, dividend_df, stock_indicator):
     screening = fundamental_screening(ctx.symbol, fin_abstract, daily_df, dividend_df)
-    dcf = dcf_valuation(ctx.symbol, fin_abstract, cashflow_df, daily_df)
+    dcf = dcf_valuation(ctx.symbol, fin_abstract, cashflow_df, daily_df,
+                        stock_indicator=stock_indicator)
     sentiment = market_sentiment(None, 0.023, stock_indicator)
     advice = investment_advice(daily_df, dcf, sentiment, screening)
     return screening, dcf, sentiment, advice
@@ -38,10 +39,11 @@ def test_score_in_range(ctx, fin_abstract, cashflow_df, daily_df, dividend_df, s
     assert "subscores" in score
 
 
-def test_renormalize_missing_individual(ctx, fin_abstract, cashflow_df, daily_df, dividend_df):
+def test_renormalize_missing_individual(ctx, fin_abstract, cashflow_df, daily_df, dividend_df, stock_indicator):
     """无个股 PE/PB 分位时，情绪类应只用市场 ERP（80）且不报错。"""
     screening = fundamental_screening(ctx.symbol, fin_abstract, daily_df, dividend_df)
-    dcf = dcf_valuation(ctx.symbol, fin_abstract, cashflow_df, daily_df)
+    dcf = dcf_valuation(ctx.symbol, fin_abstract, cashflow_df, daily_df,
+                        stock_indicator=stock_indicator)
     sentiment = {"percentile": 80.0, "pe_percentile": None,
                  "pb_percentile": None, "sentiment": "低估"}
     advice = {"latest_price": dcf["neutral"]}
@@ -50,10 +52,11 @@ def test_renormalize_missing_individual(ctx, fin_abstract, cashflow_df, daily_df
     assert abs(score["sentiment"] - 80.0) < 1e-6
 
 
-def test_valuation_monotonic_in_price(ctx, fin_abstract, cashflow_df, daily_df, dividend_df):
+def test_valuation_monotonic_in_price(ctx, fin_abstract, cashflow_df, daily_df, dividend_df, stock_indicator):
     """估值安全边际随价格单调：价格越低 → 估值分越高。"""
     screening = fundamental_screening(ctx.symbol, fin_abstract, daily_df, dividend_df)
-    dcf = dcf_valuation(ctx.symbol, fin_abstract, cashflow_df, daily_df)
+    dcf = dcf_valuation(ctx.symbol, fin_abstract, cashflow_df, daily_df,
+                        stock_indicator=stock_indicator)
     sentiment = {"percentile": 50.0, "pe_percentile": None,
                  "pb_percentile": None, "sentiment": "合理"}
     cheap = compute_score(screening, dcf, sentiment,

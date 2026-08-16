@@ -28,13 +28,12 @@ from main import main, run_batch, BATCH_DEMO_LIST
 
 # -- 配色（与 matplotlib 图表 / HTML 报告保持一致）---------
 COLORS = {
-    "price": "#1a73e8", "cons": "#d32f2f", "neu": "#f57c00", "opt": "#2e7d32",
+    "price": "#1a73e8", "liq": "#616161", "cons": "#d32f2f", "ceil": "#2e7d32",
 }
 GRADE_COLOR = {"A": "#2e7d32", "B": "#1565c0", "C": "#ef6c00", "D": "#c62828"}
 SCENES = [
-    ("保守 (Conservative)", COLORS["cons"], "dash"),
-    ("中性 (Neutral)",      COLORS["neu"],  "solid"),
-    ("乐观 (Optimistic)",   COLORS["opt"],  "dot"),
+    ("破产清算 (Liquidation)", COLORS["liq"],  "dashdot"),
+    ("保守 (Conservative)",   COLORS["cons"], "dash"),
 ]
 
 st.set_page_config(page_title="量化价值投资分析", page_icon="📊", layout="wide")
@@ -90,12 +89,31 @@ def valuation_figure(daily_df, dcf):
         x=daily_df["日期"], y=daily_df["收盘"], name="收盘价",
         line=dict(color=COLORS["price"], width=1.5),
     ))
+    # 收集估值线：画线（不带内置标注，避免多线挤在同一角），再统一错位放标签
+    lines = []
     for name, color, dash in SCENES:
         if dcf and dcf.get("valuations") and name in dcf["valuations"]:
             v = dcf["valuations"][name]["intrinsic_value"]
-            fig.add_hline(y=v, line_dash=dash, line_color=color, line_width=1.5,
-                          annotation_text=f"{name.split(' ')[0]} {v:.2f}",
-                          annotation_position="top left")
+            fig.add_hline(y=v, line_dash=dash, line_color=color, line_width=1.5)
+            lines.append((v, f"{name.split(' ')[0]} {v:.2f}", color))
+    # 合理估值上限（min(中性DCF, PE中位×EPS)）单独画一条绿实线
+    ceiling = dcf.get("fair_value_ceiling") if dcf else None
+    if ceiling:
+        fig.add_hline(y=ceiling, line_dash="solid", line_color=COLORS["ceil"],
+                      line_width=1.5)
+        lines.append((ceiling, f"合理上限 {ceiling:.2f}", COLORS["ceil"]))
+    # 标签沿 x 轴错位放置：数值接近/相等时并排而非堆叠，避免重叠
+    if daily_df is not None and not daily_df.empty and lines:
+        xs = daily_df["日期"]
+        xmin, xmax = xs.iloc[0], xs.iloc[-1]
+        span = (xmax - xmin)
+        n = len(lines)
+        for i, (v, text, color) in enumerate(lines):
+            xpos = xmin + span * (i + 0.5) / n
+            fig.add_annotation(x=xpos, y=v, text=text, showarrow=False,
+                               font=dict(color=color, size=11),
+                               bgcolor="rgba(255,255,255,0.78)",
+                               borderpad=2)
     # 最新价标注
     if not daily_df.empty:
         fig.add_trace(go.Scatter(
@@ -124,7 +142,7 @@ def sensitivity_figure(sensitivity, price=None):
         colorscale=[[0, "#eaf1fb"], [0.5, "#6fa3e6"], [1, "#0d47a1"]],
         text=[[f"{v:.1f}" for v in row] for row in z],
         texttemplate="%{text}", textfont=dict(size=10),
-        hovertemplate="增长 %{y} × WACC %{x}<br>内在价值 %{z:.2f} 元<extra></extra>",
+        hovertemplate="永续 %{y} × WACC %{x}<br>内在价值 %{z:.2f} 元<extra></extra>",
         colorbar=dict(title="元/股"),
     ))
     if price and price > 0:
@@ -134,14 +152,15 @@ def sensitivity_figure(sensitivity, price=None):
             line=dict(color=COLORS["cons"], width=2.5, dash="dash"),
             showscale=False, name=f"现价 {price:.2f}",
         ))
-    fig.update_layout(xaxis_title="折现率 WACC", yaxis_title="未来 5 年增长率",
+    fig.update_layout(xaxis_title="折现率 WACC", yaxis_title="永续增长率",
                       height=440, margin=dict(t=20))
     return fig
 
 
 def score_bar(score):
-    subs = [("质量", score.get("quality"), COLORS["opt"]),
-            ("估值", score.get("valuation"), COLORS["neu"]),
+    # 评分类别配色（与估值线解耦：质量=绿、估值=橙、情绪=蓝）
+    subs = [("质量", score.get("quality"), COLORS["ceil"]),
+            ("估值", score.get("valuation"), "#f57c00"),
             ("情绪", score.get("sentiment"), COLORS["price"])]
     names, vals, cols = [], [], []
     for n, v, c in subs:
@@ -190,7 +209,7 @@ def render_single(res):
         unsafe_allow_html=True)
 
     # 估值走势
-    st.markdown("#### 📈 估值走势（股价 vs 三情景内在价值）")
+    st.markdown("#### 📈 估值走势（股价 vs 破产清算/保守/合理估值上限）")
     if dcf.get("valuations") and daily_df is not None and not daily_df.empty:
         st.plotly_chart(valuation_figure(daily_df, dcf), use_container_width=True)
     else:
@@ -215,11 +234,14 @@ def render_single(res):
                     for n, p in SCENARIOS.items()]
             st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
             st.caption(f"基期 FCF：{dcf.get('base_fcf', 0)/1e8:.1f} 亿 · 总股本：{dcf.get('total_shares', 0)/1e8:.2f} 亿股")
+            if dcf.get("fair_value_ceiling"):
+                st.caption(f"合理估值上限: {dcf['fair_value_ceiling']:.2f} 元 "
+                           f"(过去5年PE中位 {dcf.get('pe_median_5y', 0):.1f} × 当前EPS {dcf.get('current_eps', 0):.2f})")
         else:
             st.caption("不可用")
 
     # 敏感性热力图
-    st.markdown("#### 🔥 DCF 敏感性（增长率 × WACC → 每股内在价值，红线=现价）")
+    st.markdown("#### 🔥 DCF 敏感性（永续增长率 × WACC → 每股内在价值，红线=现价）")
     sfig = sensitivity_figure(sensitivity, price)
     if sfig:
         st.plotly_chart(sfig, use_container_width=True)

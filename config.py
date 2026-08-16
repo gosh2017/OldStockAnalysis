@@ -38,24 +38,26 @@ END_DATE   = TODAY            # 日线结束日期（动态）
 FIN_START  = 2021             # 基本面起始年份
 FIN_END    = 2025             # 基本面结束年份
 
-# -- DCF 默认参数（中性情景）------------------------------
-DCF_GROWTH    = 0.10           # 未来 5 年增长率
-DCF_PERPETUAL = 0.03           # 永续增长率
-DCF_WACC      = 0.08           # 加权平均资本成本
+# -- DCF 默认参数（成熟期「老登股」适配）------------------
+# WACC 固定 9.5%；显性 5 年增长率 = 永续增长率（成熟股无独立高增长期）。
+DCF_GROWTH    = 0.015          # 显性 5 年增长率（= 中性永续）
+DCF_PERPETUAL = 0.015          # 永续增长率（中性）
+DCF_WACC      = 0.095          # 加权平均资本成本（固定）
 
-# -- 三情景参数 -------------------------------------------
+# -- 三情景参数（成熟期口径）------------------------------
+# 删乐观；保守 0% 永续、中性 1.5% 永续、破产清算 0 增长且折旧摊销不计入。
+# "liquidation": True 标记该情景用 FCF − D&A 作现金流基（D&A 不可得回退归母净利润）。
 SCENARIOS = {
-    "保守 (Conservative)": {"growth": 0.07, "perpetual": 0.02, "wacc": 0.09},
-    "中性 (Neutral)":      {"growth": 0.10, "perpetual": 0.03, "wacc": 0.08},
-    "乐观 (Optimistic)":   {"growth": 0.13, "perpetual": 0.05, "wacc": 0.07},
+    "保守 (Conservative)":  {"growth": 0.000, "perpetual": 0.000, "wacc": 0.095},
+    "中性 (Neutral)":        {"growth": 0.015, "perpetual": 0.015, "wacc": 0.095},
+    "破产清算 (Liquidation)": {"growth": 0.000, "perpetual": 0.000, "wacc": 0.095, "liquidation": True},
 }
 
 # -- DCF 敏感性分析网格 -----------------------------------
-# 在 growth × WACC 网格上扫描每股内在价值，固定永续增长率。
+# 在 永续增长率 × WACC 网格上扫描每股内在价值，每格显性期增长率 = 该行永续增长率。
 DCF_SENSITIVITY = {
-    "growth_range": (0.05, 0.15, 0.01),   # (start, stop, step)
-    "wacc_range":   (0.06, 0.12, 0.01),
-    "perpetual":    DCF_PERPETUAL,
+    "perpetual_range": (0.00, 0.03, 0.005),   # (start, stop, step) 行：永续增长率
+    "wacc_range":      (0.07, 0.12, 0.005),   # 列：折现率 WACC
 }
 
 # -- 第一步：基本面筛选阈值（可配置）----------------------

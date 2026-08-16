@@ -116,16 +116,22 @@ def generate_cashflow_detail(
     seed: int = 44,
 ) -> pd.DataFrame:
     """
-    生成现金流量表数据（仅需"购建固定资产"用于 DCF 的资本性支出）。
+    生成现金流量表数据：
+      - "购建固定资产..."：资本性支出（CAPEX，用于 FCF = OCF − CAPEX×0.7）
+      - "折旧与摊销"：D&A（用于破产清算情景 FCF − D&A）
     """
     np.random.seed(seed)
     years = list(range(start_year, end_year + 1))
     rows = []
     for year in years:
+        t = year - start_year
         capex = 50 + np.random.uniform(-10, 10)
+        # 折旧+摊销，银行典型 ~32-43 亿/年，随年小幅上升
+        da = 35 + t * 1.5 + np.random.uniform(-3, 3)
         rows.append({
             "报告期": pd.Timestamp(f"{year}-12-31"),
             "购建固定资产、无形资产和其他长期资产支付的现金": int(capex * 1e8),
+            "折旧与摊销": int(da * 1e8),
         })
     return pd.DataFrame(rows)
 

@@ -107,13 +107,13 @@ def main(ctx: StockContext, *, quiet: bool = False) -> dict:
 
     # -- 3. Step 2：DCF 估值 --
     dcf_result = dcf_valuation(ctx.symbol, fin_abstract, cashflow_df, daily_df,
-                                ctx.fin_start, ctx.fin_end)
+                                ctx.fin_start, ctx.fin_end, stock_indicator=stock_indicator)
 
     # -- 3b. DCF 敏感性分析 --
     sensitivity = dcf_sensitivity(dcf_result.get("base_fcf"), dcf_result.get("total_shares"))
     if not quiet and sensitivity.get("grid") is not None:
         sep("第二步·补充：DCF 敏感性分析")
-        print("  每股内在价值（元）随 增长率 × WACC 的变化：")
+        print("  每股内在价值（元）随 永续增长率 × WACC 的变化：")
         print(sensitivity["grid"].to_string(float_format=lambda x: f"{x:6.2f}"))
 
     # -- 4. Step 3：市场情绪 --
@@ -185,9 +185,9 @@ def _print_summary(ctx: StockContext, advice: dict, score: dict | None = None) -
     rows = [
         ("标的", ctx.stock_label),
         ("当前股价", _fmt_price(advice.get("latest_price"))),
+        ("破产清算估值", _fmt_price(advice.get("liquidation"))),
         ("保守估值", _fmt_price(advice.get("conservative"))),
-        ("中性估值", _fmt_price(advice.get("neutral"))),
-        ("乐观估值", _fmt_price(advice.get("optimistic"))),
+        ("合理估值上限", _fmt_price(advice.get("fair_value_ceiling"))),
         ("基本面筛选", "通过" if advice.get("screened") else "未通过"),
         ("市场情绪", str(advice.get("sentiment", "N/A"))),
     ]
@@ -204,7 +204,7 @@ def _print_summary(ctx: StockContext, advice: dict, score: dict | None = None) -
     for i, (label, value) in enumerate(rows):
         print(f"|  {_pad(label, label_w)}  |  {_pad(value, value_w)}  |")
         # 在估值块与判断块之间插入分隔线，增强可读性
-        if label in ("乐观估值", "市场情绪") and i < len(rows) - 1:
+        if label in ("合理估值上限", "市场情绪") and i < len(rows) - 1:
             print(f"|{'-' * (inner + 2)}|")
     print(border)
 

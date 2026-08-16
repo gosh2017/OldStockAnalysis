@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """
 可视化 — 绘制估值走势图：
-  上图：股价历史走势 + 三情景内在价值线
-  下图：相对中性估值的安全边际（溢价 / 折价）
+  上图：股价历史走势 + 估值线（破产清算 / 保守 / 合理估值上限）
+  下图：相对合理估值上限的安全边际（溢价 / 折价）
 
 标的名称/代码/输出目录均来自调用方传入的 StockContext，
 不再依赖 config 全局常量，从而支持多标的与 --out-dir。
@@ -47,17 +47,17 @@ def plot_valuation_chart(
     plt.rcParams["font.sans-serif"] = ["Microsoft YaHei", "SimHei", "DejaVu Sans"]
     plt.rcParams["axes.unicode_minus"] = False
 
+    liquidation  = valuations["破产清算 (Liquidation)"]["intrinsic_value"]
     conservative = valuations["保守 (Conservative)"]["intrinsic_value"]
-    neutral      = valuations["中性 (Neutral)"]["intrinsic_value"]
-    optimistic   = valuations["乐观 (Optimistic)"]["intrinsic_value"]
+    ceiling      = dcf_result.get("fair_value_ceiling") or valuations["中性 (Neutral)"]["intrinsic_value"]
 
-    _plot_matplotlib(daily_df, conservative, neutral, optimistic, sentiment_result, ctx)
+    _plot_matplotlib(daily_df, liquidation, conservative, ceiling, sentiment_result, ctx)
 
     if HAS_PLOTLY:
-        _plot_interactive(daily_df, conservative, neutral, optimistic, sentiment_result, ctx)
+        _plot_interactive(daily_df, liquidation, conservative, ceiling, sentiment_result, ctx)
 
 
-def _plot_matplotlib(daily_df, conservative, neutral, optimistic, sentiment_result, ctx):
+def _plot_matplotlib(daily_df, liquidation, conservative, ceiling, sentiment_result, ctx):
     """matplotlib 静态双面板图。"""
     dates  = daily_df["日期"]
     prices = daily_df["收盘"]
@@ -68,13 +68,13 @@ def _plot_matplotlib(daily_df, conservative, neutral, optimistic, sentiment_resu
 
     # 上图
     ax1.plot(dates, prices, color="#1a73e8", linewidth=1.5, label="收盘价（前复权）")
+    ax1.axhline(liquidation, color="#616161", linestyle="-.", linewidth=1.2,
+                label=f"破产清算 {liquidation:.2f} 元")
     ax1.axhline(conservative, color="#d32f2f", linestyle="--", linewidth=1.2,
                 label=f"保守估值 {conservative:.2f} 元")
-    ax1.axhline(neutral, color="#f57c00", linestyle="-", linewidth=1.2,
-                label=f"中性估值 {neutral:.2f} 元")
-    ax1.axhline(optimistic, color="#2e7d32", linestyle=":", linewidth=1.5,
-                label=f"乐观估值 {optimistic:.2f} 元")
-    ax1.fill_between(dates, conservative, optimistic, alpha=0.08, color="#1a73e8")
+    ax1.axhline(ceiling, color="#2e7d32", linestyle="-", linewidth=1.5,
+                label=f"合理估值上限 {ceiling:.2f} 元")
+    ax1.fill_between(dates, conservative, ceiling, alpha=0.08, color="#1a73e8")
 
     latest_price = prices.iloc[-1]
     latest_date  = dates.iloc[-1]
@@ -86,7 +86,7 @@ def _plot_matplotlib(daily_df, conservative, neutral, optimistic, sentiment_resu
     ax1.set_ylabel("股价（元）", fontsize=12)
     ax1.set_title(
         f"{ctx.name}（{ctx.symbol}）估值走势图\n"
-        f"股价 vs 内在价值三情景 | 市场情绪: "
+        f"股价 vs 破产清算/保守/合理估值上限 | 市场情绪: "
         f"{sentiment_result.get('sentiment', 'N/A')} "
         f"（{sentiment_result.get('percentile', 0):.0f}% 分位数）",
         fontsize=13, fontweight="bold",
@@ -95,13 +95,13 @@ def _plot_matplotlib(daily_df, conservative, neutral, optimistic, sentiment_resu
     ax1.grid(True, alpha=0.3)
 
     # 下图
-    margin = (prices - neutral) / neutral * 100
+    margin = (prices - ceiling) / ceiling * 100
     ax2.fill_between(dates, margin, 0, where=(margin >= 0),
                      color="#d32f2f", alpha=0.4, label="溢价（高估）")
     ax2.fill_between(dates, margin, 0, where=(margin < 0),
                      color="#2e7d32", alpha=0.4, label="折价（低估）")
     ax2.axhline(0, color="black", linewidth=0.8)
-    ax2.set_ylabel("相对中性估值（%）", fontsize=12)
+    ax2.set_ylabel("相对合理估值上限（%）", fontsize=12)
     ax2.legend(loc="upper right", fontsize=9)
     ax2.grid(True, alpha=0.3)
 
@@ -116,7 +116,7 @@ def _plot_matplotlib(daily_df, conservative, neutral, optimistic, sentiment_resu
     print(f"\n  [OK] 图表已保存: {chart_path}")
 
 
-def _plot_interactive(daily_df, conservative, neutral, optimistic, sentiment_result, ctx):
+def _plot_interactive(daily_df, liquidation, conservative, ceiling, sentiment_result, ctx):
     """plotly 交互式图表（plotly 未安装时不会调用）。"""
     fig = go.Figure()
 
@@ -125,15 +125,24 @@ def _plot_interactive(daily_df, conservative, neutral, optimistic, sentiment_res
         mode="lines", name="收盘价",
         line=dict(color="#1a73e8", width=1.5),
     ))
-    fig.add_hline(y=conservative, line_dash="dash", line_color="#d32f2f",
-                  annotation_text=f"保守 {conservative:.2f}",
-                  annotation_position="bottom left")
-    fig.add_hline(y=neutral, line_dash="solid", line_color="#f57c00",
-                  annotation_text=f"中性 {neutral:.2f}",
-                  annotation_position="bottom left")
-    fig.add_hline(y=optimistic, line_dash="dot", line_color="#2e7d32",
-                  annotation_text=f"乐观 {optimistic:.2f}",
-                  annotation_position="bottom left")
+    # 画线不带内置标注，再统一沿 x 错位放标签（避免多线标注挤在同一角重叠）
+    lines = [
+        (liquidation,  f"清算 {liquidation:.2f}",  "#616161"),
+        (conservative, f"保守 {conservative:.2f}", "#d32f2f"),
+        (ceiling,      f"上限 {ceiling:.2f}",      "#2e7d32"),
+    ]
+    for v, _, color in lines:
+        fig.add_hline(y=v, line_color=color, line_width=1.4)
+    # 标签沿 x 轴错位：数值接近/相等时并排而非堆叠
+    xs = daily_df["日期"]
+    xmin, xmax = xs.iloc[0], xs.iloc[-1]
+    span = (xmax - xmin)
+    n = len(lines)
+    for i, (v, text, color) in enumerate(lines):
+        xpos = xmin + span * (i + 0.5) / n
+        fig.add_annotation(x=xpos, y=v, text=text, showarrow=False,
+                           font=dict(color=color, size=11),
+                           bgcolor="rgba(255,255,255,0.78)", borderpad=2)
 
     fig.update_layout(
         title=f"{ctx.name}（{ctx.symbol}）估值走势",
@@ -196,7 +205,7 @@ def plot_sensitivity_heatmap(sensitivity: dict, ctx, price: float | None = None)
     ax.set_yticks(range(len(grid.index)))
     ax.set_yticklabels(grid.index)
     ax.set_xlabel("折现率 WACC", fontsize=11)
-    ax.set_ylabel("未来 5 年增长率", fontsize=11)
+    ax.set_ylabel("永续增长率", fontsize=11)
     title = f"{ctx.name}（{ctx.symbol}）DCF 敏感性 — 每股内在价值（元）"
     if price:
         title += f"\n现价 {price:.2f} 元 · 红线左下侧（内在价值 > 现价）= 买入区"
