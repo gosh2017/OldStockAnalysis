@@ -9,6 +9,8 @@ from .helpers import (
     estimate_dividend_yield,
     generate_historical_erp,
 )
+from .stats import percentile_of_score
+from .cache import disk_cache, clear_cache
 
 __all__ = [
     "sep",
@@ -16,4 +18,7 @@ __all__ = [
     "find_col_in",
     "estimate_dividend_yield",
     "generate_historical_erp",
+    "percentile_of_score",
+    "disk_cache",
+    "clear_cache",
 ]

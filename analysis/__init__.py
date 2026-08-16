@@ -3,13 +3,17 @@
 量化价值投资分析系统 — 分析引擎
 """
 from .step1_fundamental import fundamental_screening
-from .step2_dcf import dcf_valuation
+from .step2_dcf import dcf_valuation, dcf_sensitivity
 from .step3_sentiment import market_sentiment
 from .step4_advice import investment_advice
+from .scoring import compute_score, score_summary
 
 __all__ = [
     "fundamental_screening",
     "dcf_valuation",
+    "dcf_sensitivity",
     "market_sentiment",
     "investment_advice",
+    "compute_score",
+    "score_summary",
 ]

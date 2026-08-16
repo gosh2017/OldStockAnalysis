@@ -171,8 +171,8 @@ def generate_market_overview(seed: int = 46) -> pd.DataFrame:
     """
     np.random.seed(seed)
     n = 4800
-    # 对数正态分布模拟 PE
-    pe_raw = np.random.lognormal(mean=2.5, sigma=0.8, size=n)
+    # 对数正态分布模拟 PE：中位数 ~18（A 股典型），长右尾
+    pe_raw = np.random.lognormal(mean=np.log(18), sigma=0.6, size=n)
     pe_raw = np.clip(pe_raw, 0.5, 500)
     pe = np.round(pe_raw, 2)
 
@@ -195,16 +195,75 @@ def generate_bond_yield_10y() -> float:
     return 0.023
 
 
-def generate_all_demo_data() -> dict:
+def _seed_for(symbol: str, base: int) -> int:
+    """由股票代码派生稳定种子（不同标的得到不同但确定的序列，
+    便于批量 demo 产生有差异的得分排名；同一标的跨运行稳定）。"""
+    return base + (sum(ord(c) for c in str(symbol)) % 1000)
+
+
+def generate_stock_indicator(
+    symbol: str = STOCK_CODE,
+    start: str = START_DATE,
+    end: str = END_DATE,
+    seed: int = 47,
+) -> pd.DataFrame:
+    """
+    生成个股历史估值指标（PE / PB / 股息率），用于真实的历史分位计算。
+    模拟平安银行（银行股典型低估值）：PE ~4–6，PB ~0.5–0.7。
+    """
+    np.random.seed(seed)
+    dates = pd.bdate_range(start=start, end=end, freq="B")
+    n = len(dates)
+    # 缓慢漂移 + 噪声，避免分位极端化
+    drift = np.linspace(0, 0.4, n)
+    pe = np.clip(np.random.normal(4.8, 0.5, n) + drift, 3.5, 7.5)
+    pb = np.clip(np.random.normal(0.55, 0.06, n) + drift / 10, 0.4, 0.95)
+    div = np.clip(np.random.normal(1.3, 0.12, n), 0.8, 2.2)
+    return pd.DataFrame({
+        "日期": dates,
+        "市盈率PE": np.round(pe, 2),
+        "市净率PB": np.round(pb, 3),
+        "股息率": np.round(div, 2),
+    })
+
+
+# 内置常见 A 股清单，供离线 demo 的名称模糊搜索使用（非全市场，仅演示）。
+_DEMO_STOCK_LIST = [
+    ("000001", "平安银行"), ("000002", "万科A"), ("000063", "中兴通讯"),
+    ("000333", "美的集团"), ("000651", "格力电器"), ("000858", "五粮液"),
+    ("002594", "比亚迪"), ("002714", "牧原股份"), ("600000", "浦发银行"),
+    ("600036", "招商银行"), ("600276", "恒瑞医药"), ("600309", "万华化学"),
+    ("600519", "贵州茅台"), ("600887", "伊利股份"), ("601012", "隆基绿能"),
+    ("601166", "兴业银行"), ("601318", "中国平安"), ("601398", "工商银行"),
+    ("601888", "中国中免"), ("601899", "紫金矿业"), ("600900", "长江电力"),
+    ("601628", "中国人寿"), ("600030", "中信证券"), ("000725", "京东方A"),
+    ("300750", "宁德时代"), ("600585", "海螺水泥"), ("000568", "泸州老窖"),
+    ("600809", "山西汾酒"), ("002475", "立讯精密"), ("300059", "东方财富"),
+]
+
+
+def generate_stock_list() -> pd.DataFrame:
+    """返回内置常见 A 股 代码-名称 列表，供离线名称模糊搜索演示。"""
+    return pd.DataFrame(_DEMO_STOCK_LIST, columns=["代码", "名称"])
+
+
+def generate_all_demo_data(ctx=None) -> dict:
     """
     一次性生成所有分析步骤所需的模拟数据。
     返回的字典键与主流程中的 fetch_* 函数返回类型一致。
+
+    可选传入 StockContext：按其标的/日期范围生成，并按标的派生种子，
+    使批量 demo 的各标的得分存在差异（非真实数据，仅验证逻辑）。
     """
+    sym = ctx.symbol if ctx is not None else STOCK_CODE
+    start = ctx.start_date if ctx is not None else START_DATE
+    end = ctx.end_date if ctx is not None else END_DATE
     return {
-        "daily_df": generate_daily_data(),
-        "fin_abstract": generate_financial_abstract(),
-        "cashflow_df": generate_cashflow_detail(),
-        "dividend_df": generate_dividend(),
-        "market_df": generate_market_overview(),
-        "bond_yield": generate_bond_yield_10y(),
+        "daily_df":     generate_daily_data(sym, start, end, seed=_seed_for(sym, 42)),
+        "fin_abstract": generate_financial_abstract(sym, FIN_START, FIN_END, seed=_seed_for(sym, 43)),
+        "cashflow_df":  generate_cashflow_detail(sym, FIN_START, FIN_END, seed=_seed_for(sym, 44)),
+        "dividend_df":  generate_dividend(sym, FIN_START, FIN_END, seed=_seed_for(sym, 45)),
+        "market_df":    generate_market_overview(seed=46),
+        "bond_yield":   generate_bond_yield_10y(),
+        "stock_indicator": generate_stock_indicator(sym, start, end, seed=_seed_for(sym, 47)),
     }

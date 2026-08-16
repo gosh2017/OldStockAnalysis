@@ -13,7 +13,7 @@
 import numpy as np
 import pandas as pd
 
-from config import FIN_START, FIN_END, SCENARIOS
+from config import FIN_START, FIN_END, SCENARIOS, DCF_SENSITIVITY, DCF_PERPETUAL
 from utils import sep, find_col_in
 
 
@@ -22,11 +22,16 @@ def dcf_valuation(
     fin_abstract: pd.DataFrame,
     cashflow_df: pd.DataFrame,
     daily_df: pd.DataFrame,
+    fin_start: int | None = None,
+    fin_end: int | None = None,
 ) -> dict:
-    """执行 DCF 三情景估值，返回包含估值结果的字典。"""
+    """执行 DCF 三情景估值，返回包含估值结果的字典。
+    fin_start/fin_end 默认回退到 config.FIN_START/FIN_END（--years 可覆盖）。"""
     sep("第二步：估值锚定 — 自由现金流折现模型（DCF）")
 
-    years = list(range(FIN_START, FIN_END + 1))
+    fin_start = fin_start if fin_start is not None else FIN_START
+    fin_end = fin_end if fin_end is not None else FIN_END
+    years = list(range(fin_start, fin_end + 1))
 
     # -- 提取经营性现金流 --
     ocf_values = {}
@@ -143,10 +148,56 @@ def dcf_valuation(
     }
 
 
+def dcf_sensitivity(base_fcf, total_shares, perpetual=None) -> dict:
+    """
+    DCF 敏感性分析：在增长率 × 折现率网格上扫描每股内在价值
+    （固定永续增长率），揭示估值对关键假设的敏感程度。
+
+    纯函数，便于单测与报告复用。返回：
+      {"grid": DataFrame(行=growth,列=wacc), "growth_axis": [...], "wacc_axis": [...]}
+    base_fcf/total_shares 缺失时返回空网格。
+    """
+    if not base_fcf or not total_shares:
+        return {"grid": None, "growth_axis": [], "wacc_axis": []}
+
+    perp = perpetual if perpetual is not None else DCF_PERPETUAL
+    g_lo, g_hi, g_step = DCF_SENSITIVITY["growth_range"]
+    w_lo, w_hi, w_step = DCF_SENSITIVITY["wacc_range"]
+
+    # 用四舍五入消除浮点步进噪声，确保端点闭合
+    n_g = int(round((g_hi - g_lo) / g_step)) + 1
+    n_w = int(round((w_hi - w_lo) / w_step)) + 1
+    growth_axis = [round(g_lo + i * g_step, 6) for i in range(n_g)]
+    wacc_axis = [round(w_lo + i * w_step, 6) for i in range(n_w)]
+
+    rows = {}
+    for g in growth_axis:
+        row = {}
+        for w in wacc_axis:
+            if w <= perp:
+                row[w] = np.nan
+                continue
+            pv_sum = sum(base_fcf * (1 + g) ** t / (1 + w) ** t for t in range(1, 6))
+            terminal_value = base_fcf * (1 + g) ** 5 * (1 + perp) / (w - perp)
+            pv_terminal = terminal_value / (1 + w) ** 5
+            row[w] = (pv_sum + pv_terminal) / total_shares
+        rows[g] = row
+
+    grid = pd.DataFrame(rows).T  # 行=growth, 列=wacc
+    grid.index = [f"{g * 100:.0f}%" for g in growth_axis]
+    grid.columns = [f"{w * 100:.0f}%" for w in wacc_axis]
+    return {"grid": grid, "growth_axis": growth_axis, "wacc_axis": wacc_axis}
+
+
 def _get_total_shares(symbol: str, fin_abstract: pd.DataFrame,
                       daily_df: pd.DataFrame) -> float:
     """获取总股本。优先级：日频数据 > 财务摘要 > 估算值。
     新浪 daily 接口含 outstanding_share 字段，优先使用。
+
+    ⚠ 已知限定：最后兜底的 197.56e8 仅对 000001 平安银行成立。
+    实盘应优先依赖日频 outstanding_share 或财务摘要中的总股本；
+    分析其他标的时若前两条均取不到，每股内在价值会被低估/高估。
+    demo 模式下非 000001 标的亦会命中此兜底，属预期内简化（demo 仅验证逻辑）。
     """
     # 1. 从日频数据获取
     if daily_df is not None and not daily_df.empty:

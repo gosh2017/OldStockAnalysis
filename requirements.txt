@@ -1,7 +1,13 @@
-# 量化价值投资分析系统依赖
+# 运行依赖
 akshare>=1.10
 pandas>=1.5
 numpy>=1.21
 matplotlib>=3.5
-plotly>=5.0
-scipy>=1.7
+scipy>=1.7            # 用于分位数计算（percentileofscore）；未安装时自动回退 numpy 实现
+
+# 可选依赖
+plotly>=5.0           # 交互式估值图 + Web 仪表盘图表
+streamlit>=1.30       # Web 仪表盘（streamlit run app.py）；命令行模式不需要
+
+# 开发依赖（运行测试时需要）
+pytest>=7.0

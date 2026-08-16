@@ -289,14 +289,18 @@ def estimate_dividend_yield(
 
 def generate_historical_erp() -> list:
     """
-    基于近 5 年 A 股市场经验数据生成股债性价比（ERP）的历史模拟分布，
+    基于近 5 年 A 股市场经验生成股债性价比（ERP）的历史模拟分布，
     用于估算当前值的分位数位置。
+
+    离线兜底用途：实盘应优先用真实历史序列计算分位（见 step3 个股 PE/PB
+    分位与国债历史序列）；此分布仅在无真实历史时使用。参数校准至 A 股
+    典型水平：全市场 PE 中位数 ~18，10 年期国债 ~2.8%。
     """
     np.random.seed(42)
     erp_list = []
-    for _ in range(250):
-        pe = np.random.normal(22, 4)
-        pe = max(15, min(35, pe))
+    for _ in range(500):
+        pe = np.random.normal(18, 3)
+        pe = max(12, min(30, pe))
         bond_r = np.random.normal(0.028, 0.004)
         bond_r = max(0.02, min(0.04, bond_r))
         erp_list.append((1 / pe) - bond_r)
