@@ -35,8 +35,9 @@ from data import (
     fetch_financial_abstract,
     fetch_cashflow_detail,
     fetch_dividend,
-    fetch_market_overview,
     fetch_bond_yield_10y,
+    fetch_bond_yield_history,
+    fetch_market_pe_history,
     fetch_stock_indicator,
     fetch_stock_list,
     generate_all_demo_data,
@@ -82,13 +83,22 @@ def main(ctx: StockContext, *, quiet: bool = False) -> dict:
         market_df       = demo_data["market_df"]
         bond_yield      = demo_data["bond_yield"]
         stock_indicator = demo_data["stock_indicator"]
+        market_pe_history  = demo_data["market_pe_history"]
+        bond_yield_history = demo_data["bond_yield_history"]
     else:
         daily_df        = fetch_daily_data(ctx.symbol, ctx.start_date, ctx.end_date)
         fin_abstract    = fetch_financial_abstract(ctx.symbol)
         cashflow_df     = fetch_cashflow_detail(ctx.symbol)
         dividend_df     = fetch_dividend(ctx.symbol)
-        market_df       = fetch_market_overview()
-        bond_yield      = fetch_bond_yield_10y(ctx.end_date)
+        # 市场情绪改用乐咕真实历史市场 PE + 国债历史序列计算 ERP 分位，
+        # 弃用不可靠的 spot 快照（东财 spot_em 持续断连、新浪 spot 无 PE 列）。
+        market_pe_history  = fetch_market_pe_history()
+        bond_yield_history = fetch_bond_yield_history(ctx.end_date)
+        if bond_yield_history is not None and not bond_yield_history.empty:
+            bond_yield = float(bond_yield_history["国债收益率"].iloc[-1])
+        else:
+            bond_yield = fetch_bond_yield_10y(ctx.end_date)
+        market_df       = None
         stock_indicator = fetch_stock_indicator(ctx.symbol)
 
     # -- 2. Step 1：基本面筛选 --
@@ -107,7 +117,8 @@ def main(ctx: StockContext, *, quiet: bool = False) -> dict:
         print(sensitivity["grid"].to_string(float_format=lambda x: f"{x:6.2f}"))
 
     # -- 4. Step 3：市场情绪 --
-    sentiment = market_sentiment(market_df, bond_yield, stock_indicator)
+    sentiment = market_sentiment(market_df, bond_yield, stock_indicator,
+                                market_pe_history, bond_yield_history)
 
     # -- 5. Step 4：综合建议 --
     advice = investment_advice(daily_df, dcf_result, sentiment, screening)

@@ -103,6 +103,16 @@ OUT_DIR    = "output"
 CACHE_DIR            = ".cache"
 STOCK_LIST_TTL_HOURS  = 24   # 股票列表（~5500 只）日级更新足够
 STOCK_INDICATOR_TTL_HOURS = 12   # 个股 PE/PB 历史，半日级
+MARKET_PE_TTL_HOURS   = 24   # 全市场历史 PE（乐咕，日级更新）
+BOND_HISTORY_TTL_HOURS = 24  # 国债收益率历史（日级）
+
+# 市场情绪历史数据源：乐咕乐股主板市盈率（stock_market_pe_lg）。
+# akshare 1.17.85 源码确认返回 [date, close, pe] 完整历史序列，结束于当日，
+# 一次调用即得"当前市场 PE"+"历史序列"，取代不可靠的 spot 快照与合成 mock。
+# 可选：上证 / 深证 / 创业板 / 科创版（"上证"最具主板代表性，最稳定）。
+MARKET_PE_BOARD       = "上证"
+# 市场情绪历史 ERP 回退天数（与国债历史对齐的窗口）
+SENTIMENT_HISTORY_DAYS = 365 * 5   # 近 5 年
 
 
 # -- 贯穿调用链的上下文（去全局化的地基）------------------

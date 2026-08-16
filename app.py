@@ -15,6 +15,7 @@
 复用 main.main(ctx, quiet=True) 的完整分析管线，本文件只负责交互与可视化呈现。
 """
 import io
+import re
 from contextlib import redirect_stdout
 
 import pandas as pd
@@ -59,6 +60,27 @@ def run_batch_silent(demo=True, items=None):
     buf = io.StringIO()
     with redirect_stdout(buf):
         return run_batch(items or BATCH_DEMO_LIST, demo=demo)
+
+
+def _parse_batch_text(text: str) -> list:
+    """解析批量标的文本：每行 `代码,名称` 或仅代码（# 注释、空行跳过）。
+    返回 [(code, name), ...]。复用 main._read_batch_file 的分割逻辑。"""
+    items = []
+    for line in str(text).splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = re.split(r"[,，\s]+", line, maxsplit=1)
+        code = parts[0].strip()
+        name = parts[1].strip() if len(parts) > 1 else code
+        if code:
+            items.append((code, name))
+    return items
+
+
+def _batch_default_text() -> str:
+    """批量标的输入框默认文本（与 BATCH_DEMO_LIST 同步）。"""
+    return "\n".join(f"{c},{n}" for c, n in BATCH_DEMO_LIST)
 
 
 # -- plotly 图表构建 ---------------------------------------
@@ -307,12 +329,24 @@ with tab_single:
         st.info("👈 在左侧设置参数后点击「🚀 开始分析」")
 
 with tab_batch:
-    st.markdown("对多只标的逐只打分并按综合评分排序。Demo 模式下用内置 5 只标的 + 模拟数据。")
-    if st.button("▶ 运行批量打分（Demo 5 只）", type="primary"):
-        with st.spinner("批量分析中..."):
-            try:
-                st.session_state["batch"] = run_batch_silent(demo=True)
-            except Exception as e:
-                st.error(f"批量分析失败：{e}")
+    st.markdown("对多只标的逐只打分并按综合评分排序。")
+    st.caption("当前模式：" + ("Demo（离线模拟数据）" if demo else "在线（逐只联网分析，较慢）")
+               + "。可在左侧栏切换 Demo 模式；在线模式留空用内置清单亦可逐只联网打分。")
+    batch_text = st.text_area(
+        "批量标的（每行 `代码,名称` 或仅 `代码`；留空用内置清单）",
+        value=_batch_default_text(), height=120,
+        help="每行一只标的，格式 `代码,名称` 或仅代码；# 开头为注释。留空则用内置清单。",
+    )
+    btn_label = "▶ 运行批量打分" + ("（Demo）" if demo else "（在线逐只联网）")
+    if st.button(btn_label, type="primary"):
+        items = _parse_batch_text(batch_text) if batch_text.strip() else BATCH_DEMO_LIST
+        if not items:
+            st.error("未解析到任何标的，请按每行 `代码,名称` 输入。")
+        else:
+            with st.spinner(f"批量分析中（{len(items)} 只 · {'Demo' if demo else '在线'}）..."):
+                try:
+                    st.session_state["batch"] = run_batch_silent(demo=demo, items=items)
+                except Exception as e:
+                    st.error(f"批量分析失败：{e}")
     if "batch" in st.session_state:
         render_batch(st.session_state["batch"])

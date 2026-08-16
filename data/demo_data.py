@@ -195,6 +195,37 @@ def generate_bond_yield_10y() -> float:
     return 0.023
 
 
+def generate_market_pe_history(seed: int = 46) -> pd.DataFrame:
+    """
+    mock 市场历史市盈率序列，对应实盘 fetch_market_pe_history（乐咕·上证主板）。
+
+    约 6 年月频，围绕 ~18 波动（A 股主板典型），末段趋势性下移至 ~15，
+    使"当前 PE"略低于历史均值 → ERP 偏高 → 情绪偏"低估"，与旧 demo 行为
+    一致；用于市场情绪 ERP 历史分位代码路径的离线验证。固定种子（市场
+    情绪为全市场口径，不应按标的差异化）。
+    """
+    np.random.seed(seed)
+    dates = pd.date_range(start="2020-01-01", end=END_DATE, freq="ME")
+    n = len(dates)
+    pe = 18 + np.sin(np.linspace(0, 4 * np.pi, n)) * 2.5 + np.random.normal(0, 0.4, n)
+    pe = pe - np.linspace(0, 3, n)        # 末段趋势性下移
+    pe = np.clip(pe, 12, 28)
+    return pd.DataFrame({"日期": dates, "市盈率": np.round(pe, 2)})
+
+
+def generate_bond_yield_history(seed: int = 46) -> pd.DataFrame:
+    """
+    mock 10 年期国债收益率历史序列，对应实盘 fetch_bond_yield_history。
+    约 6 年月频，~2.3% 小幅波动，与 generate_market_pe_history 日期对齐。
+    """
+    np.random.seed(seed + 1000)           # 与 PE 序列解耦
+    dates = pd.date_range(start="2020-01-01", end=END_DATE, freq="ME")
+    n = len(dates)
+    bond = 0.023 + np.sin(np.linspace(0, 3 * np.pi, n)) * 0.003 + np.random.normal(0, 0.002, n)
+    bond = np.clip(bond, 0.018, 0.035)
+    return pd.DataFrame({"日期": dates, "国债收益率": np.round(bond, 4)})
+
+
 def _seed_for(symbol: str, base: int) -> int:
     """由股票代码派生稳定种子（不同标的得到不同但确定的序列，
     便于批量 demo 产生有差异的得分排名；同一标的跨运行稳定）。"""
@@ -266,4 +297,7 @@ def generate_all_demo_data(ctx=None) -> dict:
         "market_df":    generate_market_overview(seed=46),
         "bond_yield":   generate_bond_yield_10y(),
         "stock_indicator": generate_stock_indicator(sym, start, end, seed=_seed_for(sym, 47)),
+        # 市场情绪历史：市场口径（非按标的差异化），固定种子
+        "market_pe_history":  generate_market_pe_history(seed=46),
+        "bond_yield_history":  generate_bond_yield_history(seed=46),
     }

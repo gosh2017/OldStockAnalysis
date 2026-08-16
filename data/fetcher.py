@@ -21,7 +21,8 @@ import akshare as ak
 import pandas as pd
 
 from config import (STOCK_CODE, START_DATE, END_DATE,
-                    STOCK_LIST_TTL_HOURS, STOCK_INDICATOR_TTL_HOURS)
+                    STOCK_LIST_TTL_HOURS, STOCK_INDICATOR_TTL_HOURS,
+                    MARKET_PE_TTL_HOURS, BOND_HISTORY_TTL_HOURS, MARKET_PE_BOARD)
 from utils import try_fetch, find_col_in, disk_cache, clear_cache
 
 
@@ -299,33 +300,122 @@ def fetch_market_overview() -> pd.DataFrame | None:
     return None
 
 
+def fetch_bond_yield_history(end_date: str | None = None,
+                              force_refresh: bool = False) -> pd.DataFrame | None:
+    """
+    获取 10 年期国债收益率历史序列（bond_china_yield，2020 至今）。
+
+    带本地磁盘缓存（BOND_HISTORY_TTL_HOURS）：用于市场情绪 ERP 的历史分位
+    计算——与市场历史 PE 对齐后得到真实历史 ERP 序列，而非合成 mock 分布。
+    返回 [日期, 国债收益率]（小数制，如 0.023 表 2.3%），按日期升序；失败 None。
+    """
+    return disk_cache(
+        "bond_yield_history.pkl", BOND_HISTORY_TTL_HOURS,
+        lambda: _fetch_bond_yield_history_live(end_date),
+        force_refresh=force_refresh,
+    )
+
+
+def _fetch_bond_yield_history_live(end_date: str | None) -> pd.DataFrame | None:
+    """实时获取 10 年期国债收益率历史序列（不走缓存）。"""
+    print("\n[INFO] 正在获取 10 年期国债收益率历史序列...")
+    end = end_date or END_DATE
+    df = try_fetch(ak.bond_china_yield, start_date="20200101", end_date=end)
+    if df is None or df.empty:
+        return None
+    target_col = find_col_in(["10", "十年"], df)
+    if target_col is None:
+        return None
+    date_col = df.columns[0]
+    out = pd.DataFrame()
+    out["日期"] = pd.to_datetime(df[date_col], errors="coerce")
+    raw = pd.to_numeric(df[target_col], errors="coerce")
+    # 列值可能是 2.3（百分比）或 0.023（小数），统一为小数
+    out["国债收益率"] = raw.where(raw <= 1, raw / 100)
+    out = (out.dropna()
+             .sort_values("日期")
+             .drop_duplicates(subset=["日期"])
+             .reset_index(drop=True))
+    if out.empty:
+        return None
+    print(f"  [OK] 国债收益率历史: {len(out)} 期，"
+          f"最新 {out['国债收益率'].iloc[-1] * 100:.2f}%")
+    return out
+
+
 def fetch_bond_yield_10y(end_date: str | None = None) -> float | None:
     """
-    获取中国 10 年期国债收益率。
-    使用 bond_china_yield，返回最新收益率（小数形式，如 0.023 表示 2.3%）。
+    获取最新 10 年期国债收益率（小数形式，如 0.023 表示 2.3%）。
+    复用 fetch_bond_yield_history 末值（命中磁盘缓存，避免重复拉取）。
     end_date 默认取 config.END_DATE（今天）。
     """
-    print(f"\n[INFO] 正在获取 10 年期国债收益率...")
-
-    end = end_date or END_DATE
-    df = try_fetch(
-        ak.bond_china_yield,
-        start_date="20200101", end_date=end,
-    )
-    if df is not None and not df.empty:
-        target_col = find_col_in(["10", "十年"], df)
-        if target_col is not None:
-            df_sorted = df.copy()
-            date_col = df_sorted.columns[0]
-            df_sorted[date_col] = pd.to_datetime(df_sorted[date_col], errors="coerce")
-            df_sorted = df_sorted.sort_values(date_col)
-            val = df_sorted[target_col].dropna().iloc[-1]
-            val_pct = float(val) / 100 if val > 1 else float(val)
-            print(f"  [OK] 10 年期国债收益率: {val_pct * 100:.2f}%（来源: bond_china_yield）")
-            return val_pct
-
+    hist = fetch_bond_yield_history(end_date=end_date)
+    if hist is not None and not hist.empty:
+        val = float(hist["国债收益率"].iloc[-1])
+        print(f"  [OK] 10 年期国债收益率: {val * 100:.2f}%（来源: bond_china_yield）")
+        return val
     print("  [!] 未能从 AkShare 获取实时国债收益率，使用近 5 年典型值 ≈ 2.3%")
     return 0.023
+
+
+def fetch_market_pe_history(market: str = MARKET_PE_BOARD,
+                            force_refresh: bool = False) -> pd.DataFrame | None:
+    """
+    获取市场历史市盈率序列（乐咕乐股），用于市场情绪 ERP 历史分位。
+
+    一次调用即得"当前市场 PE"（末值）+"历史序列"，取代不可靠的 spot 快照
+    （东财 spot_em 持续断连、新浪 spot 无 PE 列）与合成 mock 分布。
+
+    带本地磁盘缓存（MARKET_PE_TTL_HOURS）。优先 stock_market_pe_lg（主板），
+    回退 stock_index_pe_lg（沪深300 指数）。返回 [日期, 市盈率]（pe>0，
+    按日期升序）；失败 None（调用方回退合成分布）。
+    """
+    return disk_cache(
+        "market_pe_history.pkl", MARKET_PE_TTL_HOURS,
+        lambda: _fetch_market_pe_history_live(market),
+        force_refresh=force_refresh,
+    )
+
+
+def _fetch_market_pe_history_live(market: str) -> pd.DataFrame | None:
+    """实时获取市场历史 PE 序列（不走缓存）。"""
+    print(f"\n[INFO] 正在获取市场历史 PE（乐咕·{market}）...")
+    fn = getattr(ak, "stock_market_pe_lg", None)
+    if fn is not None:
+        out = _normalize_market_pe(try_fetch(fn, symbol=market))
+        if out is not None:
+            return out
+    # 回退：沪深300 指数 PE（同源，覆盖面广）
+    fn_idx = getattr(ak, "stock_index_pe_lg", None)
+    if fn_idx is not None:
+        print(f"  [INFO] 主板 PE 不可用，回退沪深300 指数 PE...")
+        out = _normalize_market_pe(try_fetch(fn_idx, symbol="沪深300"))
+        if out is not None:
+            return out
+    print("  [X] 未能获取市场历史 PE，情绪分位将回退合成分布。")
+    return None
+
+
+def _normalize_market_pe(df: pd.DataFrame) -> pd.DataFrame | None:
+    """把乐咕返回归一为 [日期, 市盈率]（akshare 1.17.85 源码确认列为 [date, close, pe]）。"""
+    if df is None or df.empty:
+        return None
+    date_col = find_col_in(["date", "日期", "trade_date"], df)
+    pe_col = find_col_in(["pe", "市盈率", "PE"], df)
+    if not date_col or not pe_col:
+        return None
+    out = pd.DataFrame()
+    out["日期"] = pd.to_datetime(df[date_col], errors="coerce")
+    out["市盈率"] = pd.to_numeric(df[pe_col], errors="coerce")
+    out = out.dropna()
+    out = out[(out["市盈率"] > 0) & (out["市盈率"] < 500)]
+    if out.empty:
+        return None
+    out = (out.sort_values("日期")
+             .drop_duplicates(subset=["日期"])
+             .reset_index(drop=True))
+    print(f"  [OK] 市场历史 PE: {len(out)} 期，最新 {out['市盈率'].iloc[-1]:.2f}")
+    return out
 
 
 def fetch_stock_indicator(symbol: str = STOCK_CODE, force_refresh: bool = False) -> pd.DataFrame | None:
