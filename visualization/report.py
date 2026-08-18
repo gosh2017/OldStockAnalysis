@@ -45,8 +45,11 @@ def _df_to_html(df: pd.DataFrame, index: bool = False) -> str:
 def _dcf_table(dcf: dict) -> str:
     if not dcf or not dcf.get("valuations"):
         return "<p style='color:#888'>DCF 估值不可用</p>"
+    # 优先用 dcf 内随行业桶构造的 scenario_params（含 CAGR 推导的显性增长），
+    # 回退到全局 SCENARIOS（"其他"桶口径，零回归）。
+    params = dcf.get("scenario_params") or SCENARIOS
     rows = []
-    for name, p in SCENARIOS.items():
+    for name, p in params.items():
         v = dcf["valuations"][name]
         rows.append({
             "情景": name,
@@ -181,6 +184,7 @@ def render_html_report(ctx, daily_df, screening, dcf, sensitivity,
       <span class="num">{(score or {}).get('score', 0):.1f}<span style="font-size:16px;font-weight:400;opacity:.8"> / 100</span></span>
       <span class="grade" style="color:{grade_color}">{grade}</span>
       <span style="opacity:.85;font-size:13px">基本面筛选：{'通过' if (score or {}).get('screened') else '未通过'}</span>
+      <span style="opacity:.7;font-size:13px">· 数据完整度：{(score or {}).get('completeness_tag', '-')}（{(score or {}).get('completeness', 0):.0f}）</span>
     </div>
   </div>
 

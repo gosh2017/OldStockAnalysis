@@ -12,6 +12,8 @@ from .fetcher import (
     fetch_bond_yield_history,
     fetch_market_pe_history,
     fetch_stock_indicator,
+    fetch_industry_info,
+    map_to_industry_bucket,
     fetch_stock_list,
     search_stocks,
 )
@@ -21,6 +23,7 @@ from .demo_data import (
     generate_stock_list,
     generate_market_pe_history,
     generate_bond_yield_history,
+    generate_industry_info,
 )
 
 __all__ = [
@@ -33,6 +36,8 @@ __all__ = [
     "fetch_bond_yield_history",
     "fetch_market_pe_history",
     "fetch_stock_indicator",
+    "fetch_industry_info",
+    "map_to_industry_bucket",
     "fetch_stock_list",
     "search_stocks",
     "generate_all_demo_data",
@@ -40,4 +45,5 @@ __all__ = [
     "generate_stock_list",
     "generate_market_pe_history",
     "generate_bond_yield_history",
+    "generate_industry_info",
 ]

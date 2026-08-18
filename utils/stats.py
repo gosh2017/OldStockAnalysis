@@ -19,7 +19,25 @@ try:
           - 'weak'   scores 中 ≤ x 的占比
           - 'strict' scores 中 < x 的占比
         """
-        return float(_scipy_pos(scores, x, kind=kind))
+        # 空样本 → 0（scipy 返回 nan，约定兜底为 0，与 numpy 实现一致）
+        try:
+            if len(scores) == 0:
+                return 0.0
+        except TypeError:
+            scores = list(scores)
+            if not scores:
+                return 0.0
+        if kind == "weak":
+            return float(_scipy_pos(scores, x, kind="weak"))
+        if kind == "strict":
+            return float(_scipy_pos(scores, x, kind="strict"))
+        # 'rank' / 'mean'：(weak + strict) / 2。显式取平均而非 scipy kind='rank'——
+        # scipy ≥1.x 对「值命中数据点」的 rank 口径与 weak 相同，与本模块约定的
+        # (weak+strict)/2 不一致；显式平均保证与下方 numpy 兜底实现语义一致
+        # （test_percentile.py 交叉验证两种实现等价）。
+        weak = float(_scipy_pos(scores, x, kind="weak"))
+        strict = float(_scipy_pos(scores, x, kind="strict"))
+        return (weak + strict) / 2.0
 
 except ImportError:  # scipy 未安装：numpy 等价实现
     import numpy as np

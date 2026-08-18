@@ -9,12 +9,14 @@
   - 经营性现金流净额 / 净利润（利润质量）
 
 判断标准（阈值可在 config 中调整）：
-  有数据的年份须"全部达标"且覆盖年数 ≥ MIN_COVERAGE_YEARS。
+  有数据的年份须"中位数达标 + ≥ MIN_PASSING_YEARS 年达标 + 覆盖年数 ≥ MIN_COVERAGE_YEARS"。
   默认 ROE > 15% 且 股息率 > 2% → "初步通过筛选"，否则 → "不满足"。
+  相比"全部达标"，中位数口径允许个别异常年（如 2020 疫情）而不误杀稳健蓝筹。
 """
 import pandas as pd
 
-from config import FIN_START, FIN_END, ROE_THRESHOLD, DIV_THRESHOLD, MIN_COVERAGE_YEARS
+from config import (FIN_START, FIN_END, ROE_THRESHOLD, DIV_THRESHOLD,
+                    MIN_COVERAGE_YEARS, MIN_PASSING_YEARS)
 from utils import sep, find_col_in, estimate_dividend_yield
 
 
@@ -69,6 +71,7 @@ def fundamental_screening(
                 "资产负债率(%)": None,
                 "经营现金流/净利润": None,
                 "股息率(%)": None,
+                "分红来源": None,
             })
             continue
 
@@ -87,7 +90,7 @@ def fundamental_screening(
             except (ValueError, TypeError):
                 pass
 
-        div_yield = estimate_dividend_yield(
+        div_yield, div_source = estimate_dividend_yield(
             year, row, equity_col, dividend_df, daily_df, roe_col, np_col
         )
 
@@ -97,6 +100,7 @@ def fundamental_screening(
             "资产负债率(%)": round(debt_val, 2) if debt_val is not None else None,
             "经营现金流/净利润": round(ocf_ratio, 2) if ocf_ratio is not None else None,
             "股息率(%)": round(div_yield, 2) if div_yield else None,
+            "分红来源": div_source,
         })
 
     # -- 打印结果 --
@@ -108,21 +112,31 @@ def fundamental_screening(
     roe_series = result_df["ROE(%)"].dropna()
     div_series = result_df["股息率(%)"].dropna()
 
-    roe_pass = bool(len(roe_series) >= MIN_COVERAGE_YEARS and (roe_series > ROE_THRESHOLD).all())
-    div_pass = bool(len(div_series) >= MIN_COVERAGE_YEARS and (div_series > DIV_THRESHOLD).all())
+    # 中位数口径：允许个别异常年，避免"全部达标"误杀稳健蓝筹。
+    # 三条件：覆盖年数 ≥ MIN_COVERAGE_YEARS、中位数 > 阈值、达标年数 ≥ MIN_PASSING_YEARS。
+    roe_pass = bool(
+        len(roe_series) >= MIN_COVERAGE_YEARS
+        and roe_series.median() > ROE_THRESHOLD
+        and (roe_series > ROE_THRESHOLD).sum() >= MIN_PASSING_YEARS
+    )
+    div_pass = bool(
+        len(div_series) >= MIN_COVERAGE_YEARS
+        and div_series.median() > DIV_THRESHOLD
+        and (div_series > DIV_THRESHOLD).sum() >= MIN_PASSING_YEARS
+    )
 
-    print(f"\n  -- 筛选判断（达标线: ROE>{ROE_THRESHOLD:.0f}%, 股息率>{DIV_THRESHOLD:.0f}%, "
-          f"至少 {MIN_COVERAGE_YEARS} 年且全部达标）--")
+    print(f"\n  -- 筛选判断（达标线: ROE>{ROE_THRESHOLD:.0f}%, 股息率>{DIV_THRESHOLD:.0f}%；"
+          f"中位数达标 + ≥{MIN_PASSING_YEARS} 年达标 + 覆盖 ≥{MIN_COVERAGE_YEARS} 年）--")
     if len(roe_series) > 0:
-        print(f"  - ROE 连续 > {ROE_THRESHOLD:.0f}%：{'[PASS] 通过' if roe_pass else '[FAIL] 未通过'}"
-              f"  (ROE 范围: {roe_series.min():.1f}% ~ {roe_series.max():.1f}%, "
-          f"覆盖 {len(roe_series)}/{len(years)} 年)")
+        print(f"  - ROE > {ROE_THRESHOLD:.0f}%：{'[PASS] 通过' if roe_pass else '[FAIL] 未通过'}"
+              f"  (中位数 {roe_series.median():.1f}%，{(roe_series > ROE_THRESHOLD).sum()}/{len(roe_series)} 年达标，"
+              f"覆盖 {len(roe_series)}/{len(years)} 年)")
     else:
         print("  - ROE 数据不足")
     if len(div_series) > 0:
         print(f"  - 股息率 > {DIV_THRESHOLD:.0f}%：{'[PASS] 通过' if div_pass else '[FAIL] 未通过'}"
-              f"  (股息率范围: {div_series.min():.1f}% ~ {div_series.max():.1f}%, "
-          f"覆盖 {len(div_series)}/{len(years)} 年)")
+              f"  (中位数 {div_series.median():.1f}%，{(div_series > DIV_THRESHOLD).sum()}/{len(div_series)} 年达标，"
+              f"覆盖 {len(div_series)}/{len(years)} 年)")
     else:
         print("  - 股息率数据不足")
 

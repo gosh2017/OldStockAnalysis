@@ -205,13 +205,14 @@ def generate_market_pe_history(seed: int = 46) -> pd.DataFrame:
     """
     mock 市场历史市盈率序列，对应实盘 fetch_market_pe_history（乐咕·上证主板）。
 
-    约 6 年月频，围绕 ~18 波动（A 股主板典型），末段趋势性下移至 ~15，
-    使"当前 PE"略低于历史均值 → ERP 偏高 → 情绪偏"低估"，与旧 demo 行为
-    一致；用于市场情绪 ERP 历史分位代码路径的离线验证。固定种子（市场
-    情绪为全市场口径，不应按标的差异化）。
+    约 10 年月频（item 12：扩窗至 2016 起，与 SENTIMENT_HISTORY_DAYS=365*10 对齐），
+    围绕 ~18 波动（A 股主板典型），末段趋势性下移至 ~15，使"当前 PE"略低于
+    历史均值 → ERP 偏高 → 情绪偏"低估"，与旧 demo 行为一致；用于市场情绪
+    ERP 历史分位代码路径的离线验证。固定种子（市场情绪为全市场口径，不应
+    按标的差异化）。
     """
     np.random.seed(seed)
-    dates = pd.date_range(start="2020-01-01", end=END_DATE, freq="ME")
+    dates = pd.date_range(start="2016-01-01", end=END_DATE, freq="ME")
     n = len(dates)
     pe = 18 + np.sin(np.linspace(0, 4 * np.pi, n)) * 2.5 + np.random.normal(0, 0.4, n)
     pe = pe - np.linspace(0, 3, n)        # 末段趋势性下移
@@ -222,10 +223,11 @@ def generate_market_pe_history(seed: int = 46) -> pd.DataFrame:
 def generate_bond_yield_history(seed: int = 46) -> pd.DataFrame:
     """
     mock 10 年期国债收益率历史序列，对应实盘 fetch_bond_yield_history。
-    约 6 年月频，~2.3% 小幅波动，与 generate_market_pe_history 日期对齐。
+    约 10 年月频（item 12：与 generate_market_pe_history 同扩至 2016 起），~2.3%
+    小幅波动，与 generate_market_pe_history 日期对齐。
     """
     np.random.seed(seed + 1000)           # 与 PE 序列解耦
-    dates = pd.date_range(start="2020-01-01", end=END_DATE, freq="ME")
+    dates = pd.date_range(start="2016-01-01", end=END_DATE, freq="ME")
     n = len(dates)
     bond = 0.023 + np.sin(np.linspace(0, 3 * np.pi, n)) * 0.003 + np.random.normal(0, 0.002, n)
     bond = np.clip(bond, 0.018, 0.035)
@@ -284,6 +286,49 @@ def generate_stock_list() -> pd.DataFrame:
     return pd.DataFrame(_DEMO_STOCK_LIST, columns=["代码", "名称"])
 
 
+# 标的 → 申万一级行业名（demo 离线口径，供 generate_industry_info 返回）。
+# 覆盖 _DEMO_STOCK_LIST + BATCH_DEMO_LIST 已知行业；未命中 → "其他"。
+_DEMO_INDUSTRY = {
+    # 银行
+    "000001": "银行", "600000": "银行", "600036": "银行", "601166": "银行",
+    "601398": "银行",
+    # 非银金融
+    "601318": "非银金融", "600030": "非银金融", "300059": "非银金融",
+    "601628": "非银金融",
+    # 消费
+    "600519": "食品饮料", "000651": "家用电器", "000858": "食品饮料",
+    "600887": "食品饮料", "000568": "食品饮料", "600809": "食品饮料",
+    "000333": "家用电器", "600276": "医药生物", "601888": "社会服务",
+    "002714": "农林牧渔",
+    # 周期
+    "601899": "有色金属", "600309": "基础化工", "600585": "建筑材料",
+    "600900": "公用事业", "000002": "房地产",
+    # 成长
+    "000725": "电子", "300750": "电力设备", "002475": "电子", "601012": "电力设备",
+    "000063": "通信", "002594": "汽车",
+}
+
+
+def generate_industry_info(symbol: str = STOCK_CODE) -> dict:
+    """
+    返回 demo 标的的行业归属与总股本，对应实盘 fetch_industry_info。
+
+    总股本沿用 demo fin_abstract 的 197.56e8（平安银行口径），
+    与 dcf_valuation 现行兜底一致；行业取 _DEMO_INDUSTRY，未命中 → "其他"。
+    source 标 "demo" 以区分实盘 "em"。
+    """
+    # 局部导入避免 fetcher↔demo_data 循环依赖；复用同一纯映射函数保证口径一致
+    from data.fetcher import map_to_industry_bucket
+    industry = _DEMO_INDUSTRY.get(symbol)
+    bucket = map_to_industry_bucket(industry)
+    return {
+        "industry": industry,
+        "bucket": bucket,
+        "total_shares": 197.56e8,
+        "source": "demo",
+    }
+
+
 def generate_all_demo_data(ctx=None) -> dict:
     """
     一次性生成所有分析步骤所需的模拟数据。
@@ -306,4 +351,6 @@ def generate_all_demo_data(ctx=None) -> dict:
         # 市场情绪历史：市场口径（非按标的差异化），固定种子
         "market_pe_history":  generate_market_pe_history(seed=46),
         "bond_yield_history":  generate_bond_yield_history(seed=46),
+        # 行业归属与总股本（demo 口径，对应实盘 fetch_industry_info）
+        "industry_info":  generate_industry_info(sym),
     }

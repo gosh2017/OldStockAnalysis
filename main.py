@@ -39,6 +39,7 @@ from data import (
     fetch_bond_yield_history,
     fetch_market_pe_history,
     fetch_stock_indicator,
+    fetch_industry_info,
     fetch_stock_list,
     generate_all_demo_data,
     generate_stock_list,
@@ -85,6 +86,7 @@ def main(ctx: StockContext, *, quiet: bool = False) -> dict:
         stock_indicator = demo_data["stock_indicator"]
         market_pe_history  = demo_data["market_pe_history"]
         bond_yield_history = demo_data["bond_yield_history"]
+        industry_info   = demo_data["industry_info"]
     else:
         daily_df        = fetch_daily_data(ctx.symbol, ctx.start_date, ctx.end_date)
         fin_abstract    = fetch_financial_abstract(ctx.symbol)
@@ -100,14 +102,16 @@ def main(ctx: StockContext, *, quiet: bool = False) -> dict:
             bond_yield = fetch_bond_yield_10y(ctx.end_date)
         market_df       = None
         stock_indicator = fetch_stock_indicator(ctx.symbol)
+        industry_info   = fetch_industry_info(ctx.symbol)
 
     # -- 2. Step 1：基本面筛选 --
     screening = fundamental_screening(ctx.symbol, fin_abstract, daily_df, dividend_df,
                                        ctx.fin_start, ctx.fin_end)
 
-    # -- 3. Step 2：DCF 估值 --
+    # -- 3. Step 2：DCF 估值（行业画像决定参数 / EPS 算法 / 总股本来源）--
     dcf_result = dcf_valuation(ctx.symbol, fin_abstract, cashflow_df, daily_df,
-                                ctx.fin_start, ctx.fin_end, stock_indicator=stock_indicator)
+                                ctx.fin_start, ctx.fin_end, stock_indicator=stock_indicator,
+                                industry_info=industry_info)
 
     # -- 3b. DCF 敏感性分析 --
     sensitivity = dcf_sensitivity(dcf_result.get("base_fcf"), dcf_result.get("total_shares"))
@@ -131,7 +135,8 @@ def main(ctx: StockContext, *, quiet: bool = False) -> dict:
         print(f"  质量分: {_fmt_num(score['quality'])} | "
               f"估值分: {_fmt_num(score['valuation'])} | "
               f"情绪分: {_fmt_num(score['sentiment'])}")
-        print(f"  基本面筛选: {'通过' if score['screened'] else '未通过'}")
+        print(f"  基本面筛选: {'通过' if score['screened'] else '未通过'}"
+              f"  |  数据完整度: {score['completeness_tag']}（{score['completeness']:.0f}/100）")
 
     # -- 7. 图表 --
     if not ctx.no_chart:
@@ -147,12 +152,13 @@ def main(ctx: StockContext, *, quiet: bool = False) -> dict:
 
     # -- 最终摘要 --
     if not quiet:
-        _print_summary(ctx, advice, score)
+        _print_summary(ctx, advice, score, industry_info)
 
     return {"ctx": ctx, "screening": screening, "dcf": dcf_result,
             "sentiment": sentiment, "advice": advice, "score": score,
             "sensitivity": sensitivity, "stock_indicator": stock_indicator,
-            "daily_df": daily_df, "fin_abstract": fin_abstract}
+            "daily_df": daily_df, "fin_abstract": fin_abstract,
+            "industry_info": industry_info}
 
 
 def _fmt_price(val) -> str:
@@ -178,12 +184,19 @@ def _pad(s: str, width: int) -> str:
     return str(s) + " " * max(0, width - _disp_width(s))
 
 
-def _print_summary(ctx: StockContext, advice: dict, score: dict | None = None) -> None:
+def _print_summary(ctx: StockContext, advice: dict, score: dict | None = None,
+                   industry_info: dict | None = None) -> None:
     """打印最终分析摘要表格（动态列宽，正确处理 CJK 对齐）。"""
     sep("分析摘要")
 
+    # 行业归属（来自 fetch_industry_info / demo）；缺失时显示 N/A
+    ind = (industry_info or {}).get("industry") or "N/A"
+    bucket = (industry_info or {}).get("bucket") or "其他"
+    industry_label = f"{ind}（{bucket}）" if ind not in ("N/A", None) else "N/A"
+
     rows = [
         ("标的", ctx.stock_label),
+        ("行业归属", industry_label),
         ("当前股价", _fmt_price(advice.get("latest_price"))),
         ("破产清算估值", _fmt_price(advice.get("liquidation"))),
         ("保守估值", _fmt_price(advice.get("conservative"))),
@@ -260,12 +273,13 @@ def run_batch(items: list, demo: bool = False) -> pd.DataFrame:
             rows.append({
                 "代码": symbol, "名称": name,
                 "评分": sc.get("score", 0.0), "等级": sc.get("grade", "-"),
+                "完整度": f"{sc.get('completeness_tag', '-')}({sc.get('completeness', 0):.0f})",
                 "基本面": "通过" if sc.get("screened") else "未通过",
                 "建议": adv.get("recommendation", "N/A"),
             })
         except Exception as e:  # 单只失败不影响整体批量
             rows.append({"代码": symbol, "名称": name, "评分": 0.0, "等级": "-",
-                         "基本面": "错误", "建议": f"出错:{e}"})
+                         "完整度": "-", "基本面": "错误", "建议": f"出错:{e}"})
 
     df = pd.DataFrame(rows).sort_values("评分", ascending=False).reset_index(drop=True)
     sep("批量评分排名")

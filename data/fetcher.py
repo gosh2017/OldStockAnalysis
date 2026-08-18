@@ -22,7 +22,8 @@ import pandas as pd
 
 from config import (STOCK_CODE, START_DATE, END_DATE,
                     STOCK_LIST_TTL_HOURS, STOCK_INDICATOR_TTL_HOURS,
-                    MARKET_PE_TTL_HOURS, BOND_HISTORY_TTL_HOURS, MARKET_PE_BOARD)
+                    MARKET_PE_TTL_HOURS, BOND_HISTORY_TTL_HOURS, MARKET_PE_BOARD,
+                    INDUSTRY_INFO_TTL_HOURS, SW_TO_BUCKET)
 from utils import try_fetch, find_col_in, disk_cache, clear_cache
 
 
@@ -511,6 +512,102 @@ def _fetch_baidu_valuation(fn, symbol: str) -> pd.DataFrame | None:
     pb_str = f", PB={pb_last.iloc[-1]:.3f}" if len(pb_last) > 0 else ""
     print(f"  [OK] 个股估值指标（百度）: {len(out)} 期，最新 {pe_str}{pb_str}")
     return out
+
+
+def map_to_industry_bucket(industry: str | None) -> str:
+    """申万一级行业名 → 6 桶之一；None / 未知行业 → "其他"。纯函数，无副作用。"""
+    if not industry:
+        return "其他"
+    return SW_TO_BUCKET.get(str(industry).strip(), "其他")
+
+
+def fetch_industry_info(symbol: str = STOCK_CODE, force_refresh: bool = False) -> dict:
+    """
+    获取个股的行业归属与总股本，用于行业分桶（INDUSTRY_PROFILES 差异化参数）。
+
+    带本地磁盘缓存（INDUSTRY_INFO_TTL_HOURS，默认 720h≈月级，按 symbol 分文件）：
+    缓存有效直接读盘，过期/缺失/force_refresh 才联网。失败结果不落盘。
+
+    数据源：ak.stock_individual_info_em(symbol)，返回 item/value 两列，
+    取 "行业" 与 "总股本" 两项，并经 map_to_industry_bucket 映射到桶；
+    总股本单位为"股"（与 dcf_valuation 的 total_shares 口径一致）。
+    失败（接口漂移 / 网络异常 / 列结构异常）返回 {"industry": None, "bucket": "其他",
+    "total_shares": None, "source": "fallback"} —— 不抛、不缓存失败态，
+    调用方（dcf_valuation / scoring）对 None 均有兜底。
+    """
+    return disk_cache(
+        f"industry_{symbol}.pkl", INDUSTRY_INFO_TTL_HOURS,
+        lambda: _fetch_industry_info_live(symbol), force_refresh=force_refresh,
+    )
+
+
+def _fetch_industry_info_live(symbol: str) -> dict:
+    """实时获取个股行业归属与总股本（不走缓存）。"""
+    print(f"\n[INFO] 正在获取 {symbol} 的行业归属与总股本...")
+
+    fallback = {"industry": None, "bucket": "其他",
+                "total_shares": None, "source": "fallback"}
+
+    fn = getattr(ak, "stock_individual_info_em", None)
+    if fn is None:
+        print("  [X] ak.stock_individual_info_em 不可用，行业信息回退。")
+        return fallback
+
+    df = try_fetch(fn, symbol=symbol)
+    if df is None or df.empty:
+        print("  [X] 未能获取行业信息，回退。")
+        return fallback
+
+    # stock_individual_info_em 返回 item / value 两列
+    item_col = find_col_in(["item", "项目"], df)
+    value_col = find_col_in(["value", "值"], df)
+    if not item_col or not value_col:
+        print("  [X] 行业信息返回列结构异常，回退。")
+        return fallback
+
+    info = dict(zip(df[item_col].astype(str), df[value_col]))
+
+    # 行业：优先精确项名 "行业"，其次模糊含"行业"
+    industry = None
+    if info.get("行业") not in (None, "", "—", "-", "nan"):
+        industry = str(info["行业"]).strip()
+    if industry is None:
+        for k, v in info.items():
+            if "行业" in k and v not in (None, "", "—", "-", "nan"):
+                industry = str(v).strip()
+                break
+
+    # 总股本：优先精确项名 "总股本"，其次模糊含"总股本"
+    total_shares = None
+    if info.get("总股本") is not None:
+        total_shares = _parse_shares(info["总股本"])
+    if total_shares is None:
+        for k, v in info.items():
+            if "总股本" in k:
+                total_shares = _parse_shares(v)
+                if total_shares is not None:
+                    break
+
+    bucket = map_to_industry_bucket(industry)
+    result = {"industry": industry, "bucket": bucket,
+              "total_shares": total_shares, "source": "em"}
+    ind_str = industry if industry else "未知"
+    ts_str = f"{total_shares:.2e}" if total_shares else "未知"
+    print(f"  [OK] 行业={ind_str} → 桶={bucket}，总股本={ts_str}")
+    return result
+
+
+def _parse_shares(raw) -> float | None:
+    """把 stock_individual_info_em 的总股本值解析为 float（股数）。"""
+    if raw is None:
+        return None
+    s = str(raw).strip().replace(",", "")
+    if s in ("", "—", "-", "nan", "None"):
+        return None
+    try:
+        return float(s)
+    except (TypeError, ValueError):
+        return None
 
 
 def fetch_stock_list(force_refresh: bool = False) -> pd.DataFrame | None:

@@ -57,3 +57,16 @@ def market_df(demo_data):
 @pytest.fixture
 def bond_yield(demo_data):
     return demo_data["bond_yield"]
+
+
+@pytest.fixture(scope="session")
+def industry_info(demo_data):
+    """行业归属与总股本（demo 口径，对应实盘 fetch_industry_info）。
+    session 级：dict 不可变语义，无需逐测试 copy。"""
+    return demo_data["industry_info"]
+
+
+@pytest.fixture(scope="session")
+def bucket(industry_info):
+    """当前 demo 标的（000001）的行业桶——银行。"""
+    return industry_info["bucket"]

@@ -215,13 +215,15 @@ def estimate_dividend_yield(
     dividend_df: pd.DataFrame,
     daily_df: pd.DataFrame,
     roe_col: str, np_col: str,
-) -> float:
+) -> tuple[float, str]:
     """
-    估算某年(财报年份)的股息率。
+    估算某年(财报年份)的股息率，返回 (股息率, 来源) 二元组。
 
-    方案 1：从分红记录中提取实际分红金额 / 年末股价。
-    方案 2：用 ROE x 30%（A 股银行典型分红比例）近似。
-    方案 3：用净利润 x 30% / 隐含市值 近似。
+    来源 source ∈ {"real","estimated_roe","estimated_np","missing"}：
+      - real：方案 1，实际每股分红 / 年末股价（最可信）。
+      - estimated_roe：方案 2，ROE×30%（A 股银行典型分红比例）近似。
+      - estimated_np：方案 3，净利润×30% / 隐含市值 近似。
+      - missing：三方案均不可得 → 0.0。
 
     分红数据时间对应：
       stock_history_dividend_detail 的"公告日期"为分红方案公告时间，
@@ -260,7 +262,7 @@ def estimate_dividend_yield(
                             if not year_end.empty:
                                 price = float(year_end.iloc[-1]["收盘"])
                                 if price > 0:
-                                    return div_per_share / price * 100
+                                    return div_per_share / price * 100, "real"
         except Exception:
             pass
 
@@ -270,7 +272,7 @@ def estimate_dividend_yield(
             roe_val = float(row[roe_col])
             if roe_val > 100:
                 roe_val = roe_val / 100
-            return roe_val * 0.30 / 100 * 100
+            return roe_val * 0.30 / 100 * 100, "estimated_roe"
     except Exception:
         pass
 
@@ -280,11 +282,11 @@ def estimate_dividend_yield(
             np_val = float(row[np_col])
             implied_mv = np_val * 6
             dividend = np_val * 0.30
-            return dividend / implied_mv * 100
+            return dividend / implied_mv * 100, "estimated_np"
     except Exception:
         pass
 
-    return 0.0
+    return 0.0, "missing"
 
 
 def generate_historical_erp() -> list:

@@ -199,7 +199,8 @@ def render_single(res):
         f"<span style='font-size:18px;color:#888'> / 100</span> "
         f"<span style='font-size:30px;font-weight:700;color:{gcolor}'>{grade}</span>"
         f"</div>", unsafe_allow_html=True)
-    c0.caption(f"基本面筛选：{'通过' if score.get('screened') else '未通过'}")
+    c0.caption(f"基本面筛选：{'通过' if score.get('screened') else '未通过'}"
+               f"　·　数据完整度：{score.get('completeness_tag', '-')}（{score.get('completeness', 0):.0f}）")
     c1.metric("当前股价", f"{price:.2f} 元" if price else "N/A")
     c2.metric("市场情绪", sentiment.get("sentiment", "N/A"),
               f"{sentiment.get('percentile', 0):.0f}% 分位" if sentiment.get("percentile") is not None else None)
@@ -228,10 +229,13 @@ def render_single(res):
         st.markdown("#### 🧮 DCF 三情景估值")
         if dcf.get("valuations"):
             from config import SCENARIOS
+            # 优先用 dcf 内随行业桶构造的 scenario_params（含 CAGR 推导的显性增长），
+            # 回退到全局 SCENARIOS（"其他"桶口径，零回归）。
+            params = dcf.get("scenario_params") or SCENARIOS
             rows = [{"情景": n, "增长率": f"{p['growth']:.0%}", "永续": f"{p['perpetual']:.0%}",
                      "WACC": f"{p['wacc']:.0%}",
                      "内在价值(元)": f"{dcf['valuations'][n]['intrinsic_value']:.2f}"}
-                    for n, p in SCENARIOS.items()]
+                    for n, p in params.items()]
             st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
             st.caption(f"基期 FCF：{dcf.get('base_fcf', 0)/1e8:.1f} 亿 · 总股本：{dcf.get('total_shares', 0)/1e8:.2f} 亿股")
             if dcf.get("fair_value_ceiling"):

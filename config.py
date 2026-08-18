@@ -60,11 +60,58 @@ DCF_SENSITIVITY = {
     "wacc_range":      (0.07, 0.12, 0.005),   # 列：折现率 WACC
 }
 
+# -- 行业分桶基础设施（P1 落地，供 P2/P3b 消费）--------------
+# 根因修复：不同行业结构性地该用不同的 DCF 参数 / 筛选阈值 / 评分权重。
+# 此处先落基础设施（桶定义、申万一级映射、行业画像、缓存 TTL），
+# 行业数据获取器（fetch_industry_info）与下游消费在后续阶段接入。
+INDUSTRY_BUCKETS = ["银行", "非银金融", "消费", "周期", "成长", "其他"]
+
+# 申万一级行业名 → 桶（含常见子行业名兜底，未命中 → "其他"）
+SW_TO_BUCKET = {
+    # 银行
+    "银行": "银行",
+    # 非银金融（含子行业名兜底）
+    "非银金融": "非银金融", "证券": "非银金融", "保险": "非银金融", "多元金融": "非银金融",
+    # 消费
+    "食品饮料": "消费", "家用电器": "消费", "商业贸易": "消费", "纺织服装": "消费",
+    "农林牧渔": "消费", "医药生物": "消费", "轻工制造": "消费", "休闲服务": "消费",
+    "社会服务": "消费", "美容护理": "消费", "商贸零售": "消费",
+    # 周期
+    "采掘": "周期", "钢铁": "周期", "有色金属": "周期", "化工": "周期", "基础化工": "周期",
+    "建筑材料": "周期", "建筑装饰": "周期", "交通运输": "周期", "房地产": "周期",
+    "公用事业": "周期", "煤炭": "周期", "石油石化": "周期",
+    # 成长
+    "电子": "成长", "计算机": "成长", "传媒": "成长", "通信": "成长",
+    "电气设备": "成长", "电力设备": "成长", "汽车": "成长", "机械设备": "成长",
+    "国防军工": "成长",
+}
+
+# 行业画像：每桶差异化 DCF 参数 + 评分基准。
+#   wacc          —— 折现率（成长股低、周期股高）
+#   perpetual     —— 中性永续增长率（保守 / 破产清算恒为 0，由 scenarios_for 保证）
+#   roe_benchmark —— 评分中 ROE 满分基准（%）：银行 11、非银 12，其余 15
+#   is_financial  —— 金融桶：评分跳过资产负债率 / OCF 子分（结构不可比）
+#   eps_method    —— 基期 EPS 算法：normalized（近 5 年净利均）/ shiller（周期股平滑）
+#   growth_clip   —— 显性增长率 CAGR 裁剪区间（P2 derive_explicit_growth 用）
+DCF_GROWTH_CAGR_CLIP = (-0.05, 0.12)
+INDUSTRY_PROFILES = {
+    "银行":    {"wacc": 0.095, "perpetual": 0.015, "roe_benchmark": 11.0, "is_financial": True,  "eps_method": "normalized", "growth_clip": DCF_GROWTH_CAGR_CLIP},
+    "非银金融": {"wacc": 0.095, "perpetual": 0.015, "roe_benchmark": 12.0, "is_financial": True,  "eps_method": "normalized", "growth_clip": DCF_GROWTH_CAGR_CLIP},
+    "消费":    {"wacc": 0.090, "perpetual": 0.020, "roe_benchmark": 15.0, "is_financial": False, "eps_method": "normalized", "growth_clip": DCF_GROWTH_CAGR_CLIP},
+    "周期":    {"wacc": 0.100, "perpetual": 0.010, "roe_benchmark": 12.0, "is_financial": False, "eps_method": "shiller",    "growth_clip": DCF_GROWTH_CAGR_CLIP},
+    "成长":    {"wacc": 0.085, "perpetual": 0.025, "roe_benchmark": 15.0, "is_financial": False, "eps_method": "normalized", "growth_clip": DCF_GROWTH_CAGR_CLIP},
+    "其他":    {"wacc": 0.095, "perpetual": 0.015, "roe_benchmark": 15.0, "is_financial": False, "eps_method": "normalized", "growth_clip": DCF_GROWTH_CAGR_CLIP},
+}
+
+# 行业信息磁盘缓存 TTL（行业归属 + 总股本，月级稳定）
+INDUSTRY_INFO_TTL_HOURS = 720
+
 # -- 第一步：基本面筛选阈值（可配置）----------------------
-# 判定规则：有数据的年份须"全部达标"，且覆盖年数 ≥ MIN_COVERAGE_YEARS。
+# 判定规则：有数据年份须"中位数达标 + ≥ MIN_PASSING_YEARS 年达标 + 覆盖 ≥ MIN_COVERAGE_YEARS"。
 ROE_THRESHOLD      = 15.0     # ROE 达标线（%）
 DIV_THRESHOLD       = 2.0      # 股息率达标线（%）
 MIN_COVERAGE_YEARS  = 4        # 最少可用年数（容忍最近一年未披露完；严格 5 年可改此处）
+MIN_PASSING_YEARS   = 3        # P3a 中数判定：达标年数下限（中位数过线且 ≥N 年达标才 pass）
 
 # -- 综合评分权重 -----------------------------------------
 # 总分 = 质量 × 0.40 + 估值 × 0.35 + 情绪 × 0.25
@@ -79,9 +126,24 @@ SCORE_QUALITY_W = {
     "debt":         0.00,   # 资产负债率：默认权重 0（行业差异大，如银行 ~90%）
 }
 
+# 行业化质量权重覆盖（item 6）：与 SCORE_QUALITY_W 合并后使用。
+# - 非金融桶（其他/消费/周期/成长）：资产负债率仍有横向比较意义，debt 0→0.20，
+#   相应下调 roe/dividend；_category_score 会就现存子指标重归一，故无需严格求和为 1。
+# - 金融桶（银行/非银金融）：资产负债率结构性偏高（银行 ~90%）无判别力，debt 恒 0；
+#   经营现金流/净利润口径对金融业不适用，ocf_quality 置 0 且 _quality_subscores 跳过计算。
+SCORE_QUALITY_W_BY_BUCKET = {
+    "其他":     {"roe": 0.25, "dividend": 0.15, "debt": 0.20},
+    "消费":     {"roe": 0.25, "dividend": 0.15, "debt": 0.20},
+    "周期":     {"roe": 0.25, "dividend": 0.15, "debt": 0.20},
+    "成长":     {"roe": 0.25, "dividend": 0.15, "debt": 0.20},
+    "银行":     {"ocf_quality": 0.00},
+    "非银金融": {"ocf_quality": 0.00},
+}
+
 SCORE_VALUATION_W = {
-    "margin_neutral":     0.55,   # 相对中性估值的安全边际
-    "margin_conservative":0.45,   # 相对保守估值的安全边际
+    "margin_neutral":     0.40,   # 相对中性估值的安全边际
+    "margin_conservative":0.30,   # 相对保守估值的安全边际
+    "pb_roe":             0.30,   # PB-ROE 独立锚（item 8）：实际 PB 低于公允 PB → 高分
 }
 
 SCORE_SENTIMENT_W = {
@@ -114,7 +176,7 @@ BOND_HISTORY_TTL_HOURS = 24  # 国债收益率历史（日级）
 # 可选：上证 / 深证 / 创业板 / 科创版（"上证"最具主板代表性，最稳定）。
 MARKET_PE_BOARD       = "上证"
 # 市场情绪历史 ERP 回退天数（与国债历史对齐的窗口）
-SENTIMENT_HISTORY_DAYS = 365 * 5   # 近 5 年
+SENTIMENT_HISTORY_DAYS = 365 * 10   # 近 10 年（item 12：扩窗以稳定分位估计）
 
 
 # -- 贯穿调用链的上下文（去全局化的地基）------------------

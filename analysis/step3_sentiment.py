@@ -29,29 +29,33 @@ from utils import sep, find_col_in, generate_historical_erp, percentile_of_score
 
 def _historical_erp_series(market_pe_history: pd.DataFrame | None,
                            bond_yield_history: pd.DataFrame | None,
-                           bond_yield: float) -> list | None:
+                           bond_yield: float) -> tuple[list | None, bool]:
     """
     从市场历史 PE + 国债历史构造历史 ERP 序列（1/pe − bond，按日期对齐）。
 
     国债历史按市场 PE 的日期 reindex + ffill 对齐（国债收益率慢变，日前向
     填充合理）；早于国债起点的 PE 日期用标量 bond_yield 兜底。无国债历史时
-    整列用标量 bond_yield。返回 ERP 列表（已 dropna、过滤 (0,1) 区间外异常，
-    长度≥2）；构造失败返回 None（调用方回退合成分布）。
+    整列用标量 bond_yield。返回 (erp 列表, used_real_bond)：
+      - erp 列表已 dropna、过滤 (0,1) 区间外异常，长度≥2；构造失败为 None
+        （调用方回退合成分布）。
+      - used_real_bond：是否实际用到了真实国债历史序列（False=整列标量兜底，
+        调用方据此标 erp_source="real_partial"）。
     """
     if market_pe_history is None or market_pe_history.empty:
-        return None
+        return None, False
     pe = market_pe_history.copy()
     pe["日期"] = pd.to_datetime(pe["日期"], errors="coerce")
     pe["市盈率"] = pd.to_numeric(pe["市盈率"], errors="coerce")
     pe = pe.dropna(subset=["日期", "市盈率"])
     pe = pe[(pe["市盈率"] > 0) & (pe["市盈率"] < 500)]
     if pe.empty:
-        return None
+        return None, False
     pe = (pe.sort_values("日期")
             .drop_duplicates(subset=["日期"])
             .set_index("日期"))
 
     bond_aligned = None
+    used_real_bond = False
     if bond_yield_history is not None and not bond_yield_history.empty:
         bd = bond_yield_history.copy()
         bd["日期"] = pd.to_datetime(bd["日期"], errors="coerce")
@@ -63,6 +67,7 @@ def _historical_erp_series(market_pe_history: pd.DataFrame | None,
         if not bd.empty:
             bond_aligned = bd.reindex(pe.index).ffill()      # 对齐到 PE 日期
             bond_aligned = bond_aligned.fillna(bond_yield)    # 早于国债起点用标量
+            used_real_bond = True
 
     if bond_aligned is None:
         bond_aligned = pd.Series(bond_yield, index=pe.index)
@@ -71,7 +76,7 @@ def _historical_erp_series(market_pe_history: pd.DataFrame | None,
     erp = erp.replace([np.inf, -np.inf], np.nan).dropna()
     erp = erp[(erp > 0) & (erp < 1)]                          # 过滤异常 ERP
     out = erp.tolist()
-    return out if len(out) >= 2 else None
+    return (out if len(out) >= 2 else None, used_real_bond)
 
 
 def market_sentiment(market_df: pd.DataFrame | None,
@@ -87,9 +92,11 @@ def market_sentiment(market_df: pd.DataFrame | None,
     （见 _historical_erp_series）；二者缺失时回退合成分布 generate_historical_erp()。
 
     当前市场 PE 取值优先级：market_pe_history 末值 > market_df 快照中位数 > 默认 20。
-    可选 stock_indicator 计算个股自身 PE/PB 历史分位。
+    可选 stock_indicator 计算个股自身 PE/PB 历史分位，并暴露 current_pe/current_pb
+    供评分层 PB-ROE 锚使用（item 8）。erp_source 标历史分位来源可信度
+    （real/real_partial/synthetic，item 10）。
     返回 pe_median/bond_yield/equity_risk_premium/percentile/sentiment/
-    pe_percentile/pb_percentile/market_pe_source。
+    pe_percentile/pb_percentile/market_pe_source/current_pe/current_pb/erp_source。
     """
     sep("第三步：市场情绪辅助 — 股债性价比分析")
 
@@ -132,12 +139,22 @@ def market_sentiment(market_df: pd.DataFrame | None,
 
     # -- 历史分位数（优先真实历史 ERP 序列，缺失回退合成分布）--
     # 高分位 = 当前 ERP 处于历史高位 = 股票相对便宜（低估）
-    historical_erp = _historical_erp_series(market_pe_history, bond_yield_history, bond_yield)
+    # erp_source 标注分位来源可信度：
+    #   real          = 真实 PE + 真实国债历史序列
+    #   real_partial  = 仅 PE 真实、国债整列标量兜底（可信度降低，[WARN] 不静默）
+    #   synthetic     = 无真实 PE 历史序列 → 合成分布兜底（[WARN] 不静默）
+    historical_erp, used_real_bond = _historical_erp_series(
+        market_pe_history, bond_yield_history, bond_yield)
     if historical_erp is None:
         historical_erp = generate_historical_erp()
-        print(f"  [INFO] 无真实历史序列，以合成分布估算分位（{len(historical_erp)} 期）")
-    else:
+        erp_source = "synthetic"
+        print(f"  [WARN] 无真实历史序列，降级合成分布估算分位（{len(historical_erp)} 期）")
+    elif used_real_bond:
+        erp_source = "real"
         print(f"  [INFO] 历史分位基于真实序列（{len(historical_erp)} 期 ERP）")
+    else:
+        erp_source = "real_partial"
+        print(f"  [WARN] 历史分位仅 PE 真实、国债用标量兜底，可信度降低（{len(historical_erp)} 期 ERP）")
     percentile = percentile_of_score(historical_erp, equity_risk_premium)
     percentile = max(0, min(100, percentile))
 
@@ -159,25 +176,28 @@ def market_sentiment(market_df: pd.DataFrame | None,
 
     # -- 个股自身 PE/PB 历史分位（真实分位）--
     # 分位含义：高 = 当前估值处于历史高位 = 偏贵；低 = 偏便宜。
+    # current_pe/current_pb 暴露当前值供评分层 PB-ROE 锚使用（item 8）。
     pe_percentile = None
     pb_percentile = None
+    current_pe = None
+    current_pb = None
     if stock_indicator is not None and not stock_indicator.empty:
         print(f"\n  -- 个股自身估值分位（{len(stock_indicator)} 期历史）--")
         if "市盈率PE" in stock_indicator.columns:
             pe_s = pd.to_numeric(stock_indicator["市盈率PE"], errors="coerce").dropna()
             pe_s = pe_s[(pe_s > 0) & (pe_s < 1000)]
             if len(pe_s) > 1:
-                cur_pe = float(pe_s.iloc[-1])
-                pe_percentile = percentile_of_score(pe_s.tolist(), cur_pe)
-                print(f"  [DATA] 当前 PE={cur_pe:.2f}，处于自身历史 {pe_percentile:.1f}% 分位"
+                current_pe = float(pe_s.iloc[-1])
+                pe_percentile = percentile_of_score(pe_s.tolist(), current_pe)
+                print(f"  [DATA] 当前 PE={current_pe:.2f}，处于自身历史 {pe_percentile:.1f}% 分位"
                       f"（{ '偏贵' if pe_percentile > 60 else ('便宜' if pe_percentile < 40 else '合理')}）")
         if "市净率PB" in stock_indicator.columns:
             pb_s = pd.to_numeric(stock_indicator["市净率PB"], errors="coerce").dropna()
             pb_s = pb_s[(pb_s > 0) & (pb_s < 100)]
             if len(pb_s) > 1:
-                cur_pb = float(pb_s.iloc[-1])
-                pb_percentile = percentile_of_score(pb_s.tolist(), cur_pb)
-                print(f"  [DATA] 当前 PB={cur_pb:.3f}，处于自身历史 {pb_percentile:.1f}% 分位"
+                current_pb = float(pb_s.iloc[-1])
+                pb_percentile = percentile_of_score(pb_s.tolist(), current_pb)
+                print(f"  [DATA] 当前 PB={current_pb:.3f}，处于自身历史 {pb_percentile:.1f}% 分位"
                       f"（{ '偏贵' if pb_percentile > 60 else ('便宜' if pb_percentile < 40 else '合理')}）")
 
     return {
@@ -189,4 +209,7 @@ def market_sentiment(market_df: pd.DataFrame | None,
         "pe_percentile": pe_percentile,
         "pb_percentile": pb_percentile,
         "market_pe_source": market_pe_source,
+        "current_pe": current_pe,
+        "current_pb": current_pb,
+        "erp_source": erp_source,
     }
