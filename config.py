@@ -5,6 +5,10 @@
 本模块是整个系统的"单一事实源"：标的、日期范围、DCF 参数、筛选阈值、
 评分权重、敏感性网格、输出目录，以及贯穿调用链的 StockContext 上下文，
 全部集中在此，便于一处修改、全局生效。
+
+导航：行业化口径见 README「行业分桶」小节——下方 INDUSTRY_BUCKETS /
+SW_TO_BUCKET / INDUSTRY_PROFILES 三者共同决定各桶的 DCF 参数、ROE 基准、
+EPS 算法与评分权重差异化；tests/test_industry.py 守护其完整性。
 """
 import os
 from dataclasses import dataclass
