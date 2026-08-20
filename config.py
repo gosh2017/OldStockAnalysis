@@ -97,14 +97,17 @@ SW_TO_BUCKET = {
 #   is_financial  —— 金融桶：评分跳过资产负债率 / OCF 子分（结构不可比）
 #   eps_method    —— 基期 EPS 算法：normalized（近 5 年净利均）/ shiller（周期股平滑）
 #   growth_clip   —— 显性增长率 CAGR 裁剪区间（P2 derive_explicit_growth 用）
+#   capex_ratio   —— capex 取不到时按 OCF 的该比例估算维持性支出（item A1）。
+#                    重资产（周期 0.45）高、轻资产（消费 0.15）低，避免固定 0.20
+#                    使重资产股 FCF 虚高、轻资产股 FCF 虚低污染 DCF 基数。
 DCF_GROWTH_CAGR_CLIP = (-0.05, 0.12)
 INDUSTRY_PROFILES = {
-    "银行":    {"wacc": 0.095, "perpetual": 0.015, "roe_benchmark": 11.0, "is_financial": True,  "eps_method": "normalized", "growth_clip": DCF_GROWTH_CAGR_CLIP},
-    "非银金融": {"wacc": 0.095, "perpetual": 0.015, "roe_benchmark": 12.0, "is_financial": True,  "eps_method": "normalized", "growth_clip": DCF_GROWTH_CAGR_CLIP},
-    "消费":    {"wacc": 0.090, "perpetual": 0.020, "roe_benchmark": 15.0, "is_financial": False, "eps_method": "normalized", "growth_clip": DCF_GROWTH_CAGR_CLIP},
-    "周期":    {"wacc": 0.100, "perpetual": 0.010, "roe_benchmark": 12.0, "is_financial": False, "eps_method": "shiller",    "growth_clip": DCF_GROWTH_CAGR_CLIP},
-    "成长":    {"wacc": 0.085, "perpetual": 0.025, "roe_benchmark": 15.0, "is_financial": False, "eps_method": "normalized", "growth_clip": DCF_GROWTH_CAGR_CLIP},
-    "其他":    {"wacc": 0.095, "perpetual": 0.015, "roe_benchmark": 15.0, "is_financial": False, "eps_method": "normalized", "growth_clip": DCF_GROWTH_CAGR_CLIP},
+    "银行":    {"wacc": 0.095, "perpetual": 0.015, "roe_benchmark": 11.0, "is_financial": True,  "eps_method": "normalized", "growth_clip": DCF_GROWTH_CAGR_CLIP, "capex_ratio": 0.10},
+    "非银金融": {"wacc": 0.095, "perpetual": 0.015, "roe_benchmark": 12.0, "is_financial": True,  "eps_method": "normalized", "growth_clip": DCF_GROWTH_CAGR_CLIP, "capex_ratio": 0.10},
+    "消费":    {"wacc": 0.090, "perpetual": 0.020, "roe_benchmark": 15.0, "is_financial": False, "eps_method": "normalized", "growth_clip": DCF_GROWTH_CAGR_CLIP, "capex_ratio": 0.15},
+    "周期":    {"wacc": 0.100, "perpetual": 0.010, "roe_benchmark": 12.0, "is_financial": False, "eps_method": "shiller",    "growth_clip": DCF_GROWTH_CAGR_CLIP, "capex_ratio": 0.45},
+    "成长":    {"wacc": 0.085, "perpetual": 0.025, "roe_benchmark": 15.0, "is_financial": False, "eps_method": "normalized", "growth_clip": DCF_GROWTH_CAGR_CLIP, "capex_ratio": 0.25},
+    "其他":    {"wacc": 0.095, "perpetual": 0.015, "roe_benchmark": 15.0, "is_financial": False, "eps_method": "normalized", "growth_clip": DCF_GROWTH_CAGR_CLIP, "capex_ratio": 0.20},
 }
 
 # 行业信息磁盘缓存 TTL（行业归属 + 总股本，月级稳定）

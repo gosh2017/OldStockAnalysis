@@ -7,7 +7,8 @@
 
 三情景（由 scenarios_for(bucket) 按行业画像构造；"其他"桶 == 历史口径）：
   保守（0% 永续）/ 中性（CAGR 推导的显性增长率 + 行业永续）/ 破产清算（0 增长，折旧摊销不计入）
-  破产清算现金流 = FCF - 折旧摊销（移除非现金加回）；D&A 不可得时回退归母净利润。
+  破产清算现金流 = FCF - 折旧摊销（移除非现金加回）；D&A 不可得时按 FCF×0.5 估算清算口径
+  （与基期 FCF 缺失时 base_fcf×0.5 兜底一致，避免回退净利润导致 liquidation > conservative）。
 
 合理估值上限 = min(中性 DCF, 过去 5 年 PE 中位数 × 当前 EPS)，
 作为最终估值天花板，避免 DCF 对成熟股过度外推。
@@ -42,9 +43,16 @@ def scenarios_for(bucket: str) -> dict:
 
 
 def derive_explicit_growth(net_profit_values: dict, clip=DCF_GROWTH_CAGR_CLIP) -> float | None:
-    """由 ≥3 年归母净利润推算 CAGR，clip 到给定区间。
+    """由 ≥3 年归母净利润推算显性增长率（CAGR），clip 到给定区间（item A2）。
 
-    不足 3 年、首末含非正值（CAGR 无定义）、或时间跨度 ≤0 → None（回退行业永续）。
+    口径由原"首末两点 CAGR"改为对 log(净利润) 序列做最小二乘线性回归：
+    斜率 s 即隐含连续增长率，CAGR = exp(s) - 1。利用全部年份而非仅首末两点，
+    避免周期股首末恰好落在峰/谷导致的严重失真。
+
+    回退 None（→ 行业永续）的条件：
+      - 不足 3 个数据点；
+      - 任一净利润 ≤ 0（log 无定义；首末非正即触发，含原回退语义）；
+      - 时间跨度 ≤ 0。
     """
     vals = sorted((int(y), float(v)) for y, v in net_profit_values.items())
     if len(vals) < 3:
@@ -52,10 +60,11 @@ def derive_explicit_growth(net_profit_values: dict, clip=DCF_GROWTH_CAGR_CLIP) -
     years = [v[0] for v in vals]
     profits = [v[1] for v in vals]
     n_years = years[-1] - years[0]
-    first, last = profits[0], profits[-1]
-    if n_years <= 0 or first <= 0 or last <= 0:
+    if n_years <= 0 or any(p <= 0 for p in profits):
         return None
-    cagr = (last / first) ** (1.0 / n_years) - 1.0
+    # 最小二乘：log(利润) 对年份的线性回归，斜率 = 隐含连续增长率
+    slope, _ = np.polyfit(np.array(years, dtype=float), np.log(profits), 1)
+    cagr = float(np.exp(slope) - 1.0)
     lo, hi = clip
     return float(max(lo, min(hi, cagr)))
 
@@ -76,6 +85,15 @@ def dcf_valuation(
     stock_indicator（个股历史 PE/PB）用于「过去 5 年 PE 中位数 × 当前 EPS」锚定上限。
     industry_info（行业归属 + 总股本，来自 fetch_industry_info）：决定 DCF 参数 /
     EPS 算法 / 总股本来源；None → "其他"桶（== 现行口径，零回归）。
+
+    返回 dict 字段（本任务 A1/A4/A5 新增/调整）：
+      capex_estimated : bool，是否有年份 capex 走了行业比例兜底（item A1），
+                        供下游完整度置信度接线使用（本任务只暴露，不接 scoring）。
+      各情景 intrinsic_value : wacc≤永续时该情景置 None（item A4，主路径防御性 guard）。
+      base_fcf_liquidation : D&A 不可得时按 FCF×0.5 估算（item A5），不再回退归母净利润。
+
+    TODO（item A3）：估值安全边际非线性映射（恢复极端值区分度）归入 prompt B
+    （scoring.py 的 margin 子分改造），本层只暴露 conservative/neutral 原始值，不在此处映射。
     """
     sep("第二步：估值锚定 — 自由现金流折现模型（DCF）")
 
@@ -162,11 +180,16 @@ def dcf_valuation(
     print(header)
     print(f"  {'-' * (len(header) - 2)}")
 
+    # item A1：capex 兜底按行业 capex_ratio（重资产高、轻资产低），不再固定 0.20
+    capex_ratio = profile["capex_ratio"]
+    capex_estimated_years = set()   # 走兜底的年份，供完整度置信度标记（item A1）
+
     for year in years:
         ocf = ocf_values.get(year, 0)
         capex = capex_values.get(year, 0)
         if year not in capex_values:
-            capex = abs(ocf) * 0.20  # 典型水平近似（维持性口径）
+            capex = abs(ocf) * capex_ratio  # 按行业比例估算维持性 capex
+            capex_estimated_years.add(year)
         fcf = ocf - capex * 0.7     # 仅 70% capex 视为维持性支出
         fcf_values[year] = fcf
         da = da_values.get(year, 0)
@@ -176,6 +199,8 @@ def dcf_valuation(
         else:
             print(f"  {year:>6d}  {ocf / 1e8:>12.1f}  {capex / 1e8:>12.1f}"
                   f"  {fcf / 1e8:>12.1f}")
+    if capex_estimated_years:
+        print(f"  [!] capex 缺失年份 {sorted(capex_estimated_years)} 按 OCF×{capex_ratio:.2f}（{bucket}桶）估算")
 
     # -- 显性增长率（CAGR 推导，item 1）--
     explicit_growth = derive_explicit_growth(net_profit_values, profile["growth_clip"])
@@ -194,7 +219,8 @@ def dcf_valuation(
                 "total_shares": None, "conservative": None, "neutral": None,
                 "neutral_raw": None, "liquidation": None, "fair_value_ceiling": None,
                 "pe_median_5y": None, "current_eps": None, "pe_anchor_value": None,
-                "da_available": da_available, "bucket": bucket,
+                "da_available": da_available, "capex_estimated": bool(capex_estimated_years),
+                "bucket": bucket,
                 "scenario_params": scenario_params, "explicit_growth": explicit_growth,
                 "has_negative_fcf": has_negative_fcf, "eps_method": eps_method}
 
@@ -203,14 +229,17 @@ def dcf_valuation(
     print(f"\n  [PIN] 基期 FCF（加权均值，含负值）: {base_fcf / 1e8:.1f} 亿元"
           + ("  [含负值年份]" if has_negative_fcf else ""))
 
-    # -- 破产清算基期 FCF（加权；FCF - D&A；D&A 不可得回退归母净利润）--
+    # -- 破产清算基期 FCF（加权；FCF - D&A；D&A 不可得按 FCF×0.5 估算清算口径，item A5）--
+    # 破产清算语义应"移除非现金加回"。D&A 不可得时不再回退归母净利润
+    # （会把非现金收益加回，常致 liquidation > conservative）；改按 FCF×0.5
+    # 估算清算口径，与 all_liq 为空时的 base_fcf*0.5 一致，自然保证 ≤ 保守。
     liquidation_fcf_values = {}
     for year in years:
         fcf = fcf_values.get(year, 0)
         if da_available:
             liquidation_fcf_values[year] = fcf - da_values.get(year, 0)
         else:
-            liquidation_fcf_values[year] = net_profit_values.get(year, 0)
+            liquidation_fcf_values[year] = fcf * 0.5
     all_liq = [v for v in liquidation_fcf_values.values() if v is not None]
     if all_liq:
         w_liq = np.linspace(0.5, 1.0, len(all_liq))
@@ -220,7 +249,7 @@ def dcf_valuation(
     if da_available:
         print(f"  [PIN] 破产清算基期 FCF（FCF - 折旧摊销）: {base_fcf_liquidation / 1e8:.1f} 亿元")
     else:
-        print(f"  [!] D&A 不可得，破产清算回退归母净利润口径: {base_fcf_liquidation / 1e8:.1f} 亿元")
+        print(f"  [!] D&A 不可得，按 FCF×0.5 估算清算口径: {base_fcf_liquidation / 1e8:.1f} 亿元")
 
     # -- 总股本（item 2：industry_info 优先 + 无兜底 None 守卫）--
     total_shares = _get_total_shares(symbol, fin_abstract, daily_df, industry_info)
@@ -230,7 +259,8 @@ def dcf_valuation(
                 "total_shares": None, "conservative": None, "neutral": None,
                 "neutral_raw": None, "liquidation": None, "fair_value_ceiling": None,
                 "pe_median_5y": None, "current_eps": None, "pe_anchor_value": None,
-                "da_available": da_available, "bucket": bucket,
+                "da_available": da_available, "capex_estimated": bool(capex_estimated_years),
+                "bucket": bucket,
                 "scenario_params": scenario_params, "explicit_growth": explicit_growth,
                 "has_negative_fcf": has_negative_fcf, "eps_method": eps_method}
     print(f"  [PIN] 总股本: {total_shares / 1e8:.2f} 亿股")
@@ -244,6 +274,20 @@ def dcf_valuation(
     for scenario_name, params in scenario_params.items():
         g, perp_g, wacc = params["growth"], params["perpetual"], params["wacc"]
         base = base_fcf_liquidation if params.get("liquidation") else base_fcf
+
+        # item A4：防御性 guard——wacc ≤ 永续增长时 terminal value 发散（除零/负值），
+        # 跳过该情景（intrinsic_value 置 None），保证不产生负/无穷内在价值。
+        # 现行画像配置安全（永续 ≤0.025 < wacc ≥0.085），仅作配置被改/永续抬升时的安全网。
+        if wacc <= perp_g:
+            print(f"  [!] wacc≤永续，跳过该情景: {scenario_name} (wacc={wacc:.1%}, perp={perp_g:.1%})")
+            valuations[scenario_name] = {
+                "intrinsic_value": None,
+                "enterprise_value": None,
+                "pv_operations": None,
+                "pv_terminal": None,
+                "terminal_value": None,
+            }
+            continue
 
         pv_sum = sum(
             base * ((1 + g) ** t) / ((1 + wacc) ** t)
@@ -275,7 +319,20 @@ def dcf_valuation(
     neutral_raw  = valuations["中性 (Neutral)"]["intrinsic_value"]
     liquidation  = valuations["破产清算 (Liquidation)"]["intrinsic_value"]
 
-    # 安全钳位：保证 破产清算 <= 保守（D&A 可得时 inert，仅回退净利润路径生效）
+    # item A4 兜底：某情景因 wacc≤永续被跳过（intrinsic_value=None）时，
+    # 给下游一个安全的非空值，避免 investment_advice 直接索引 None 而崩溃。
+    # 零增长 0 永续口径下保守情景不会触发，此处仅作 None→0 安全网。
+    if conservative is None:
+        conservative = 0.0
+        valuations["保守 (Conservative)"]["intrinsic_value"] = conservative
+    if neutral_raw is None:
+        neutral_raw = conservative
+        valuations["中性 (Neutral)"]["intrinsic_value"] = neutral_raw
+    if liquidation is None:
+        liquidation = conservative
+        valuations["破产清算 (Liquidation)"]["intrinsic_value"] = liquidation
+
+    # 安全钳位：保证 破产清算 <= 保守（D&A 可得时 inert；A5 后 FCF×0.5 口径自然成立）
     if liquidation > conservative:
         liquidation = conservative
         valuations["破产清算 (Liquidation)"]["intrinsic_value"] = liquidation
@@ -345,6 +402,7 @@ def dcf_valuation(
         "current_eps": current_eps,
         "pe_anchor_value": pe_anchor_value,
         "da_available": da_available,
+        "capex_estimated": bool(capex_estimated_years),  # item A1：是否有年份 capex 走了行业兜底
         "bucket": bucket,
         "scenario_params": scenario_params,
         "explicit_growth": explicit_growth,

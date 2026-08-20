@@ -80,11 +80,28 @@ def test_generate_all_demo_data_has_industry_key(ctx):
 def test_industry_profiles_complete():
     """6 桶齐全且每桶画像字段完整（与 P2/P3b 消费契约一致）。"""
     assert set(INDUSTRY_PROFILES.keys()) == set(INDUSTRY_BUCKETS)
-    required = {"wacc", "perpetual", "roe_benchmark", "is_financial", "eps_method", "growth_clip"}
+    required = {"wacc", "perpetual", "roe_benchmark", "is_financial", "eps_method",
+                "growth_clip", "capex_ratio"}
     for bucket, profile in INDUSTRY_PROFILES.items():
         assert required.issubset(profile.keys()), f"{bucket} 缺字段: {required - set(profile.keys())}"
         assert profile["eps_method"] in ("normalized", "shiller"), f"{bucket} eps_method 非法"
         assert profile["growth_clip"] == DCF_GROWTH_CAGR_CLIP
+        # capex_ratio 必须落在合理区间（0, 1）
+        assert 0.0 < profile["capex_ratio"] < 1.0, f"{bucket} capex_ratio 越界"
+
+
+def test_capex_ratio_differentiated_by_bucket():
+    """capex_ratio 按行业差异化（item A1）：重资产周期最高、轻资产消费/金融最低。"""
+    assert INDUSTRY_PROFILES["周期"]["capex_ratio"] == 0.45    # 重资产（钢铁/公用事业/采掘）
+    assert INDUSTRY_PROFILES["消费"]["capex_ratio"] == 0.15    # 轻资产
+    assert INDUSTRY_PROFILES["银行"]["capex_ratio"] == 0.10
+    assert INDUSTRY_PROFILES["非银金融"]["capex_ratio"] == 0.10
+    assert INDUSTRY_PROFILES["成长"]["capex_ratio"] == 0.25
+    assert INDUSTRY_PROFILES["其他"]["capex_ratio"] == 0.20    # 历史兜底口径
+    # 单调：重资产 > 兜底 > 轻资产
+    assert (INDUSTRY_PROFILES["周期"]["capex_ratio"]
+            > INDUSTRY_PROFILES["其他"]["capex_ratio"]
+            > INDUSTRY_PROFILES["消费"]["capex_ratio"])
 
 
 def test_other_bucket_matches_legacy_scenarios():

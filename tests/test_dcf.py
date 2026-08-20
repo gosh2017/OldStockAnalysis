@@ -9,7 +9,9 @@ DCF 估值测试（成熟期「老登股」口径 + 行业画像）：
 """
 import numpy as np
 
+import analysis.step2_dcf as dcf_mod
 from analysis import dcf_valuation
+from analysis.step2_dcf import derive_explicit_growth
 from config import INDUSTRY_PROFILES
 
 SCN_ORDER = ["保守 (Conservative)", "中性 (Neutral)", "破产清算 (Liquidation)"]
@@ -31,6 +33,8 @@ def test_dcf_structure(ctx, fin_abstract, cashflow_df, daily_df, stock_indicator
     assert "fair_value_ceiling" in dcf
     assert "base_fcf_liquidation" in dcf
     assert dcf["da_available"] is True   # demo cashflow 含 D&A 列
+    # item A1：demo capex 齐全 → 无年份走兜底 → capex_estimated=False
+    assert dcf["capex_estimated"] is False
     # P2 新增字段（"其他"桶口径）
     assert dcf["bucket"] == "其他"
     assert dcf["eps_method"] == "normalized"
@@ -108,13 +112,16 @@ def test_fair_value_ceiling_binds_when_pe_low(ctx, fin_abstract, cashflow_df, da
 
 
 def test_liquidation_fallback_no_da(ctx, fin_abstract, cashflow_df, daily_df, stock_indicator):
-    """D&A 不可得时回退归母净利润，且钳位保证 liquidation <= conservative。"""
+    """item A5：D&A 不可得时按 FCF×0.5 估算清算口径（不再回退归母净利润），
+    自然保证 liquidation <= conservative（不依赖事后钳位）。"""
     cf_no_da = cashflow_df.drop(
         columns=[c for c in cashflow_df.columns if "折旧" in str(c) or "摊销" in str(c)])
     dcf = dcf_valuation(ctx.symbol, fin_abstract, cf_no_da, daily_df,
                         stock_indicator=stock_indicator)
     assert dcf["da_available"] is False
-    # 回退净利润（银行净利润 >> FCF 会超保守），钳位保证 ≤
+    # FCF×0.5 口径：清算基期 = 基期 FCF × 0.5
+    assert abs(dcf["base_fcf_liquidation"] - dcf["base_fcf"] * 0.5) < 1e-6
+    # 自然 ≤ 保守（0.5×FCF < FCF，保守情景用 base_fcf 且 0 增长，无需钳位）
     assert dcf["liquidation"] <= dcf["conservative"]
 
 
@@ -220,3 +227,120 @@ def test_shiller_eps_for_cyclic(ctx, fin_abstract, cashflow_df, daily_df, stock_
     assert dcf["eps_method"] == "shiller"
     assert dcf["bucket"] == "周期"
     assert dcf["current_eps"] is not None and dcf["current_eps"] > 0
+
+
+# -- item A1：capex 行业化兜底 ------------------------------------------
+
+def _drop_capex(cf):
+    """去掉资本性支出列，模拟 capex 全缺失。"""
+    return cf.drop(columns=[c for c in cf.columns
+                            if "购建" in str(c) or "固定资产" in str(c)])
+
+
+def _ocf_weighted_mean(fin_abstract):
+    """从财务摘要提取各年 OCF，按 step2_dcf 同款权重算加权均值（原始元）。"""
+    fa = fin_abstract.copy()
+    fa["年份"] = fa["报告期"].dt.year
+    ocf_vals = []
+    for y in range(2021, 2026):
+        row = fa[fa["年份"] == y].sort_values("报告期").iloc[-1]
+        ocf_vals.append(float(row["经营活动产生的现金流量净额"]))
+    w = np.linspace(0.5, 1.0, len(ocf_vals))
+    return float(np.average(np.array(ocf_vals), weights=w))
+
+
+def test_capex_fallback_uses_industry_ratio(ctx, fin_abstract, cashflow_df, daily_df,
+                                            stock_indicator):
+    """item A1：capex 缺失年份按行业 capex_ratio 兜底（周期桶 0.45），
+    capex_estimated=True，且 base_fcf = OCF×(1 − 0.45×0.7)。"""
+    cf_no_capex = _drop_capex(cashflow_df)
+    dcf = dcf_valuation(ctx.symbol, fin_abstract, cf_no_capex, daily_df,
+                        stock_indicator=stock_indicator,
+                        industry_info={"bucket": "周期"})
+    assert dcf["capex_estimated"] is True
+    # 周期桶 0.45：capex = OCF×0.45 → fcf = OCF − OCF×0.45×0.7 = OCF×0.685
+    ocf_wmean = _ocf_weighted_mean(fin_abstract)
+    expected_base = ocf_wmean * (1 - INDUSTRY_PROFILES["周期"]["capex_ratio"] * 0.7)
+    assert abs(dcf["base_fcf"] - expected_base) < 1.0       # 1 元容差
+
+
+def test_capex_ratio_differentiates_fcf(ctx, fin_abstract, cashflow_df, daily_df,
+                                        stock_indicator):
+    """item A1：行业差异化使重资产周期桶 FCF 低于轻资产消费桶（修正固定 0.20 的虚高/虚低）。"""
+    dcf_cycle = dcf_valuation(ctx.symbol, fin_abstract, _drop_capex(cashflow_df), daily_df,
+                              stock_indicator=stock_indicator,
+                              industry_info={"bucket": "周期"})    # 0.45
+    dcf_cons  = dcf_valuation(ctx.symbol, fin_abstract, _drop_capex(cashflow_df), daily_df,
+                              stock_indicator=stock_indicator,
+                              industry_info={"bucket": "消费"})    # 0.15
+    # 0.45 扣得多 → 周期 base_fcf < 消费 base_fcf（同样 OCF 下）
+    assert dcf_cycle["base_fcf"] < dcf_cons["base_fcf"]
+
+
+# -- item A2：显性增长率最小二乘 CAGR -----------------------------------
+
+def test_derive_explicit_growth_least_squares():
+    """item A2：[10,8,12,14,16] 最小二乘 CAGR 落在 clip 内且方向合理（正增长）。
+    两点法 CAGR≈12.5%、最小二乘≈16.2%，均超 clip 上限 0.12 → 裁剪到 0.12。"""
+    vals = {2021: 10.0, 2022: 8.0, 2023: 12.0, 2024: 14.0, 2025: 16.0}
+    g = derive_explicit_growth(vals)
+    assert g is not None
+    lo, hi = INDUSTRY_PROFILES["其他"]["growth_clip"]   # == DCF_GROWTH_CAGR_CLIP
+    assert lo <= g <= hi            # 落在 clip 内
+    assert g > 0                    # 方向合理：序列整体上行 → 正增长
+
+
+def test_derive_explicit_growth_declining_negative():
+    """item A2：下行序列 → 负增长方向，clip 到下限 -5%。"""
+    vals = {2021: 16.0, 2022: 14.0, 2023: 12.0, 2024: 10.0, 2025: 8.0}
+    g = derive_explicit_growth(vals)
+    assert g is not None
+    lo, hi = INDUSTRY_PROFILES["其他"]["growth_clip"]
+    assert lo <= g <= hi
+    assert g < 0                    # 方向合理：序列整体下行 → 负增长
+
+
+def test_derive_explicit_growth_insufficient_returns_none():
+    """item A2：不足 3 个数据点 → None（回退行业永续）。"""
+    assert derive_explicit_growth({2021: 10.0, 2022: 12.0}) is None
+    assert derive_explicit_growth({}) is None
+    assert derive_explicit_growth({2021: 10.0}) is None
+
+
+def test_derive_explicit_growth_nonpositive_returns_none():
+    """item A2：任一净利润 ≤ 0（log 无定义）→ None（含原首末非正回退语义）。"""
+    # 首点为 0
+    assert derive_explicit_growth({2021: 0.0, 2022: 12.0, 2023: 14.0}) is None
+    # 末点为负
+    assert derive_explicit_growth({2021: 10.0, 2022: 12.0, 2023: -5.0}) is None
+    # 中间为负（原两点法不触发，最小二乘因 log 无定义而回退）
+    assert derive_explicit_growth({2021: 10.0, 2022: -8.0, 2023: 14.0, 2024: 16.0}) is None
+
+
+# -- item A4：wacc≤永续 防御性 guard ------------------------------------
+
+def test_wacc_le_perp_guard_skips_scenario(ctx, fin_abstract, cashflow_df, daily_df,
+                                           stock_indicator, monkeypatch):
+    """item A4：wacc≤永续的情景被 guard 跳过，不产生负/无穷内在价值、不抛异常。
+    post-loop 安全兜底把 None 转为非负有限值，供下游 investment_advice（无 None 处理）使用。"""
+    def divergent_scenarios(_bucket):
+        return {
+            "保守 (Conservative)":  {"growth": 0.000, "perpetual": 0.000, "wacc": 0.095},
+            "中性 (Neutral)":        {"growth": 0.30, "perpetual": 0.30, "wacc": 0.095},  # perp>wacc
+            "破产清算 (Liquidation)": {"growth": 0.000, "perpetual": 0.000, "wacc": 0.095, "liquidation": True},
+        }
+    monkeypatch.setattr(dcf_mod, "scenarios_for", divergent_scenarios)
+    # 不抛异常
+    dcf = dcf_valuation(ctx.symbol, fin_abstract, cashflow_df, daily_df,
+                        stock_indicator=stock_indicator)
+    iv_n = dcf["valuations"]["中性 (Neutral)"]["intrinsic_value"]
+    # 核心：guard 后不产生负数/无穷（None 或非负有限值）
+    assert iv_n is None or (np.isfinite(iv_n) and iv_n >= 0)
+    assert not (iv_n is not None and (iv_n < 0 or np.isinf(iv_n) or np.isnan(iv_n)))
+    # guard 触发证据：中性被跳过后 post-loop 兜底 = 保守值（正常中性 > 保守）
+    assert abs(dcf["neutral_raw"] - dcf["conservative"]) < 1e-9
+    # 未触发 guard 的情景正常计算为正
+    assert dcf["valuations"]["保守 (Conservative)"]["intrinsic_value"] > 0
+    assert dcf["valuations"]["破产清算 (Liquidation)"]["intrinsic_value"] > 0
+    # 阶梯仍单调
+    assert dcf["liquidation"] <= dcf["conservative"]
