@@ -159,6 +159,11 @@ SCORE_SENTIMENT_W = {
     "individual_pb": 0.30,   # 个股市净率分位（低=便宜=高分）
 }
 
+# 完整度温和折让（item B1）：避免数据稀疏标的因类内重归一而虚高。
+#   score = score * (floor + weight * completeness / 100)
+#   完整度 100 → ×1.0（不折让），0 → ×floor（0.70）。
+SCORE_COMPLETENESS_PENALTY = {"floor": 0.70, "weight": 0.30}
+
 # 等级划分（从高到低匹配，命中即止）
 GRADE_BANDS = [("A", 80), ("B", 65), ("C", 50), ("D", 0)]
 

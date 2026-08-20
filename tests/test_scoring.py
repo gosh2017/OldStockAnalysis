@@ -191,3 +191,66 @@ def test_completeness_signal_isolation():
         scr, {"base_fcf": 1e9, "neutral": 20.0, "bucket": "其他"},
         {"percentile": 50.0, "erp_source": "real"}, {"latest_price": 10.0})
     assert s_real_erp["completeness"] > s_no_erp["completeness"]
+
+
+# -- item B1-B4：综合评分层合理性优化 ----------------------------------------
+
+def test_completeness_penalty():
+    """B1：完整度温和折让——低完整度压低分数；完整度 100 不折让。
+
+    同一 screening / dcf / advice，仅切换 erp_source 拉开完整度：
+    pre-penalty 分数完全一致，分数差异纯粹来自完整度折让因子。
+    """
+    scr = _screening_full_real()
+    dcf = {"base_fcf": 1e9, "neutral": 20.0, "conservative": 15.0, "bucket": "其他"}
+    advice = {"latest_price": 10.0}
+    # erp real → 覆盖100 + DCF100 + 股息real100 + erp100 = 完整度 100 → 因子 1.0
+    full = compute_score(scr, dcf, {"percentile": 50.0, "erp_source": "real"}, advice)
+    assert full["completeness"] == 100.0
+    assert abs(full["completeness_factor"] - 1.0) < 1e-9      # 完整度 100 → 不折让
+    # erp synthetic → 完整度下移、因子 < 1.0、最终分被压低
+    low = compute_score(scr, dcf, {"percentile": 50.0, "erp_source": "synthetic"}, advice)
+    assert low["completeness"] < 100.0
+    assert low["completeness_factor"] < 1.0
+    # 因子符合配置公式 floor + weight * completeness / 100
+    expected = 0.70 + 0.30 * low["completeness"] / 100.0
+    assert abs(low["completeness_factor"] - expected) < 1e-6
+    assert low["score"] < full["score"]                       # 折让压低了最终分
+
+
+def test_roe_stability_level_modulation():
+    """B2：ROE 稳定性分含水平调制——"稳定地差"（低 ROE）不再虚高。"""
+    # 稳定地差：ROE≈2%±0.5%（CV 小，但水平远低于基准 15%）
+    low_roe = _screening_with(roe=(1.5, 2.0, 2.5, 2.0, 2.0))
+    low_stab = _quality_subscores(low_roe, "其他")["roe_stability"]
+    # 稳定地好：ROE≈15%±3%（CV 同样小，水平达基准）
+    high_roe = _screening_with(roe=(12.0, 15.0, 18.0, 15.0, 15.0))
+    high_stab = _quality_subscores(high_roe, "其他")["roe_stability"]
+    assert low_stab is not None and high_stab is not None
+    assert low_stab < high_stab                              # 单调关系合理
+    assert low_stab < 30.0                                   # 调制后明显压低（无调制本应 ~82）
+    assert high_stab > 50.0
+
+
+def test_debt_uses_latest_year():
+    """B3：资产负债率改用近 1 年值，不因历史峰值被压低。"""
+    # 末值 40（最新年）→ 高分；历史峰值 80 不应再压低分数
+    scr = _screening_with(debt=(60, 80, 40, 40, 40))
+    subs = _quality_subscores(scr, "其他")
+    assert subs["debt"] == 100.0                             # 末值 40 → 100 - max(0,40-50)*2 = 100
+    # 对照：全 80 → 末值 80 → 40 分（低分），证明不是恒高分
+    scr_high = _screening_with(debt=(80, 80, 80, 80, 80))
+    assert _quality_subscores(scr_high, "其他")["debt"] == 40.0
+
+
+def test_ocf_quality_uses_median():
+    """B4：OCF 质量改用中位数，抗亏损年极值，不被单点主导。"""
+    # 异常高值 25.0：中位数 0.5 → 50；若用均值则被拉高至 clip 100
+    scr_outlier = _screening_with(ocf=(0.3, 0.4, 0.5, 0.6, 25.0))
+    out = _quality_subscores(scr_outlier, "其他")["ocf_quality"]
+    # 去掉异常值：中位数仍 0.5 → 50，证明中位数路径不被单点主导
+    scr_clean = _screening_with(ocf=(0.3, 0.4, 0.5, 0.6, 0.7))
+    clean = _quality_subscores(scr_clean, "其他")["ocf_quality"]
+    assert out == 50.0
+    assert clean == 50.0
+    assert out == clean

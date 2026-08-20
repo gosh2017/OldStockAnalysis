@@ -24,7 +24,7 @@ import pandas as pd
 from config import (
     SCORE_WEIGHTS, SCORE_QUALITY_W, SCORE_QUALITY_W_BY_BUCKET,
     SCORE_VALUATION_W, SCORE_SENTIMENT_W, GRADE_BANDS,
-    INDUSTRY_PROFILES,
+    INDUSTRY_PROFILES, SCORE_COMPLETENESS_PENALTY,
 )
 
 
@@ -88,10 +88,13 @@ def _quality_subscores(screening: dict, bucket: str = "其他") -> dict:
             subs["roe"] = _clip(roe_s.mean() / roe_benchmark * 100)   # 基准→100
             if len(roe_s) > 1:
                 mean = roe_s.mean()
+                # item B2：水平调制因子——ROE 长期偏低但 CV 小（"稳定地差"）
+                #   不应与水平分独立加权后叠加虚高；达基准→1.0，半基准→0.5
+                modulation = min(1.0, mean / roe_benchmark)
                 if mean > 1e-9:
-                    subs["roe_stability"] = _clip(100 - (roe_s.std() / mean) * 100)
+                    subs["roe_stability"] = _clip((100 - (roe_s.std() / mean) * 100) * modulation)
                 else:
-                    subs["roe_stability"] = _clip(100 - roe_s.std() * 5)  # 均值≈0 回退
+                    subs["roe_stability"] = _clip((100 - roe_s.std() * 5) * modulation)  # 均值≈0 回退
 
     # 股息率水平 + 分红连续性
     div_col = col("股息率")
@@ -107,14 +110,15 @@ def _quality_subscores(screening: dict, bucket: str = "其他") -> dict:
         if ocf_col:
             ocf_s = pd.to_numeric(table[ocf_col], errors="coerce").dropna()
             if len(ocf_s) > 0:
-                subs["ocf_quality"] = _clip(ocf_s.mean() * 100)         # 比例 ≥1 → 100
+                subs["ocf_quality"] = _clip(ocf_s.median() * 100)       # item B4：中位数抗亏损年极值；比例 ≥1 → 100
 
     # 资产负债率（行业差异大；是否计入由 SCORE_QUALITY_W_BY_BUCKET 的 debt 权重控制）
     debt_col = col("资产负债率")
     if debt_col:
         debt_s = pd.to_numeric(table[debt_col], errors="coerce").dropna()
         if len(debt_s) > 0:
-            subs["debt"] = _clip(100 - max(0, debt_s.max() - 50) * 2)  # 50%→100, 100%→0
+            # item B3：用近 1 年值（table 已按年份排序，末行即最新年），反映当前杠杆而非历史峰值
+            subs["debt"] = _clip(100 - max(0, debt_s.iloc[-1] - 50) * 2)  # 50%→100, 100%→0
     return subs
 
 
@@ -297,6 +301,12 @@ def compute_score(screening: dict, dcf: dict, sentiment: dict,
     # item 11：完整性置信度（汇总各信号可信度，独立于评分，供展示层标注）
     completeness, completeness_tag = _completeness(screening, dcf, sentiment)
 
+    # item B1：完整度温和折让——数据稀疏标的因类内重归一而虚高，按完整度折扣。
+    #   完整度 100 → ×1.0（不折让），0 → ×floor；factor 透传至展示层打印可见。
+    factor = (SCORE_COMPLETENESS_PENALTY["floor"]
+              + SCORE_COMPLETENESS_PENALTY["weight"] * completeness / 100.0)
+    score = _clip(score * factor)
+
     return {
         "score": round(score, 1),
         "grade": _grade(score),
@@ -311,6 +321,7 @@ def compute_score(screening: dict, dcf: dict, sentiment: dict,
         "screened": (screening or {}).get("screened", False),
         "completeness": round(completeness, 1),
         "completeness_tag": completeness_tag,
+        "completeness_factor": factor,
     }
 
 

@@ -137,6 +137,7 @@ def main(ctx: StockContext, *, quiet: bool = False) -> dict:
               f"情绪分: {_fmt_num(score['sentiment'])}")
         print(f"  基本面筛选: {'通过' if score['screened'] else '未通过'}"
               f"  |  数据完整度: {score['completeness_tag']}（{score['completeness']:.0f}/100）")
+        print(f"  [INFO] 完整度折让: ×{score['completeness_factor']:.2f}")
 
     # -- 7. 图表 --
     if not ctx.no_chart:
