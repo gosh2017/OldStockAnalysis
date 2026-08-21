@@ -23,7 +23,7 @@ from config import (
     FIN_START, FIN_END, SCENARIOS, DCF_SENSITIVITY,
     INDUSTRY_PROFILES, DCF_GROWTH_CAGR_CLIP,
 )
-from utils import sep, find_col_in
+from utils import sep, find_col_in, pick_annual_row
 
 
 def scenarios_for(bucket: str) -> dict:
@@ -109,6 +109,7 @@ def dcf_valuation(
     # -- 提取经营性现金流 & 归母净利润（fin_abstract）--
     ocf_values = {}
     net_profit_values = {}
+    non_annual_years = set()   # item C3：仅季报的年份（两表去重汇总，透明标注）
 
     if fin_abstract is not None and not fin_abstract.empty:
         date_col = find_col_in(["报告日期", "报告期", "report"], fin_abstract)
@@ -120,7 +121,13 @@ def dcf_valuation(
             for year in years:
                 year_data = fin_abstract[fin_abstract["年份"] == year]
                 if not year_data.empty:
-                    row = year_data.sort_values(date_col).iloc[-1]
+                    # item C3：年报优先，季报透明标注（不改值）
+                    row, is_annual = pick_annual_row(year_data, date_col)
+                    if row is None:
+                        row = year_data.sort_values(date_col).iloc[-1]
+                        is_annual = True
+                    if not is_annual:
+                        non_annual_years.add(year)
                     if ocf_col:
                         try:
                             ocf_values[year] = float(row[ocf_col])
@@ -150,7 +157,13 @@ def dcf_valuation(
             for year in years:
                 year_data = cashflow_df[cashflow_df["年份"] == year]
                 if not year_data.empty:
-                    row = year_data.sort_values(date_col_cf).iloc[-1]
+                    # item C3：年报优先，季报透明标注（不改值）
+                    row, is_annual = pick_annual_row(year_data, date_col_cf)
+                    if row is None:
+                        row = year_data.sort_values(date_col_cf).iloc[-1]
+                        is_annual = True
+                    if not is_annual:
+                        non_annual_years.add(year)
                     if capex_col:
                         try:
                             capex_values[year] = float(row[capex_col])
@@ -169,6 +182,10 @@ def dcf_valuation(
                         except (ValueError, TypeError):
                             pass
     da_available = bool(da_values)
+
+    # item C3：仅季报年份透明提醒（两表去重，每年仅打印一次）
+    for year in sorted(non_annual_years):
+        print(f"  [!] {year} 年仅季报，数据待年报")
 
     # -- 计算 FCF（FCF = OCF - CAPEX×0.7）--
     print(f"\n  [DATA] 各年现金流数据（单位：亿元）\n")
@@ -222,7 +239,8 @@ def dcf_valuation(
                 "da_available": da_available, "capex_estimated": bool(capex_estimated_years),
                 "bucket": bucket,
                 "scenario_params": scenario_params, "explicit_growth": explicit_growth,
-                "has_negative_fcf": has_negative_fcf, "eps_method": eps_method}
+                "has_negative_fcf": has_negative_fcf, "eps_method": eps_method,
+                "non_annual_years": sorted(non_annual_years)}
 
     weights = np.linspace(0.5, 1.0, len(all_fcf))  # 近年权重大
     base_fcf = float(np.average(all_fcf, weights=weights))
@@ -262,7 +280,8 @@ def dcf_valuation(
                 "da_available": da_available, "capex_estimated": bool(capex_estimated_years),
                 "bucket": bucket,
                 "scenario_params": scenario_params, "explicit_growth": explicit_growth,
-                "has_negative_fcf": has_negative_fcf, "eps_method": eps_method}
+                "has_negative_fcf": has_negative_fcf, "eps_method": eps_method,
+                "non_annual_years": sorted(non_annual_years)}
     print(f"  [PIN] 总股本: {total_shares / 1e8:.2f} 亿股")
 
     # -- 三情景 DCF --
@@ -408,6 +427,7 @@ def dcf_valuation(
         "explicit_growth": explicit_growth,
         "has_negative_fcf": has_negative_fcf,
         "eps_method": eps_method,
+        "non_annual_years": sorted(non_annual_years),   # item C3：仅季报年份（接口预留，未接 scoring）
     }
 
 

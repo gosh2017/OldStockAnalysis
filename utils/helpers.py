@@ -9,7 +9,8 @@ import pandas as pd
 
 warnings.filterwarnings("ignore")
 
-from config import AKSHARE_TIMEOUT, AKSHARE_RETRIES, AKSHARE_HEADERS
+from config import (AKSHARE_TIMEOUT, AKSHARE_RETRIES, AKSHARE_HEADERS,
+                    INDUSTRY_PROFILES)
 
 # 配置 AkShare 全局会话
 try:
@@ -164,6 +165,44 @@ def find_col_in(candidates: list, df: pd.DataFrame) -> str | None:
     return None
 
 
+def pick_annual_row(year_df: pd.DataFrame, date_col: str) -> tuple:
+    """
+    从某年的财报行中选取最具代表性的报告期行（item C3）。
+
+    优先取报告期月份 == 12 的行（年报）中日期最大者；该年内无 12 月行时
+    回退取年内最大日期行（可能是季报），并在返回的 is_annual 标志中标注。
+    解决旧 `sort_values(date).iloc[-1]` 在数据源该年仅返回到三季报时把季报当
+    全年用的问题——季报数据仍采用，但透明标注以便下游降权/提醒。
+
+    参数:
+      year_df  : 已筛到某一年的财报 DataFrame（含 date_col 列）。
+      date_col : 报告期日期列名（须可被 pd.to_datetime 解析）。
+
+    返回:
+      (row: pd.Series, is_annual: bool)
+        - row        : 选中行（年报优先；否则年内最大日期行）。
+        - is_annual  : 选中行报告期是否为 12 月（True=年报口径）。
+      year_df 为空或 date_col 无法解析时返回 (None, False)。
+    """
+    if year_df is None or year_df.empty or not date_col:
+        return None, False
+
+    df = year_df.copy()
+    df[date_col] = pd.to_datetime(df[date_col], errors="coerce")
+    df = df.dropna(subset=[date_col])
+    if df.empty:
+        return None, False
+
+    annual = df[df[date_col].dt.month == 12]
+    if not annual.empty:
+        row = annual.sort_values(date_col).iloc[-1]
+        return row, True
+
+    # 无 12 月行 → 取年内最大日期行（季报），标注非年报
+    row = df.sort_values(date_col).iloc[-1]
+    return row, False
+
+
 def _find_div_per_share_col(div_data: pd.DataFrame) -> str | None:
     """
     在分红 DataFrame 中查找"每股分红金额"对应的列。
@@ -215,21 +254,32 @@ def estimate_dividend_yield(
     dividend_df: pd.DataFrame,
     daily_df: pd.DataFrame,
     roe_col: str, np_col: str,
+    bucket: str = "其他",
+    market_pe: float | None = None,
 ) -> tuple[float, str]:
     """
     估算某年(财报年份)的股息率，返回 (股息率, 来源) 二元组。
 
     来源 source ∈ {"real","estimated_roe","estimated_np","missing"}：
       - real：方案 1，实际每股分红 / 年末股价（最可信）。
-      - estimated_roe：方案 2，ROE×30%（A 股银行典型分红比例）近似。
-      - estimated_np：方案 3，净利润×30% / 隐含市值 近似。
+      - estimated_roe：方案 2，ROE×行业分红率近似（item C2：去硬编码 0.30，
+        改用 INDUSTRY_PROFILES[bucket]['payout_ratio']；成长股 0.15、消费股 0.40）。
+      - estimated_np：方案 3，净利润×行业分红率 / 隐含市值 近似（item C2：
+        隐含市值 = 净利润 × 市场PE，PE 缺失回退 20；原 np_val×6 使股息率系统性偏高）。
       - missing：三方案均不可得 → 0.0。
+
+    bucket/market_pe 为可选参数，向后兼容（不传 → "其他"桶 + PE 回退 20），
+    "real" 主路径不变。
 
     分红数据时间对应：
       stock_history_dividend_detail 的"公告日期"为分红方案公告时间，
       通常发生在财报年度的次年。例如 2024-06-06 公告的分红是 FY2023 分红。
       因此匹配规则：公告年份 = year + 1。
     """
+    # 行业分红率假设（item C2）：未匹配桶回退"其他"0.30
+    profile = INDUSTRY_PROFILES.get(bucket) or INDUSTRY_PROFILES["其他"]
+    payout_ratio = profile["payout_ratio"]
+
     # 方案 1：分红记录
     if dividend_df is not None and not dividend_df.empty:
         try:
@@ -266,22 +316,25 @@ def estimate_dividend_yield(
         except Exception:
             pass
 
-    # 方案 2：ROE x 30% 近似
+    # 方案 2：ROE x 行业分红率近似（item C2：去硬编码 0.30）
     try:
         if roe_col and equity_col:
             roe_val = float(row[roe_col])
             if roe_val > 100:
                 roe_val = roe_val / 100
-            return roe_val * 0.30 / 100 * 100, "estimated_roe"
+            return roe_val * payout_ratio / 100 * 100, "estimated_roe"
     except Exception:
         pass
 
-    # 方案 3：净利润 x 30% / 隐含市值 近似
+    # 方案 3：净利润 x 行业分红率 / 隐含市值 近似（item C2：市值 = 净利润 × 市场PE）
+    # 隐含市值 = 净利润 × 市场 PE（市场 PE 缺失回退 20）；股息 = 净利润 × 分红率；
+    # 股息率 = 股息 / 隐含市值 = 分红率 / 市场 PE。
     try:
         if np_col:
             np_val = float(row[np_col])
-            implied_mv = np_val * 6
-            dividend = np_val * 0.30
+            pe = market_pe if market_pe and market_pe > 0 else 20.0
+            implied_mv = np_val * pe          # 市值 = 净利润 × 市场 PE
+            dividend = np_val * payout_ratio
             return dividend / implied_mv * 100, "estimated_np"
     except Exception:
         pass

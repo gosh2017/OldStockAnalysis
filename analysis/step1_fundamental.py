@@ -17,7 +17,7 @@ import pandas as pd
 
 from config import (FIN_START, FIN_END, ROE_THRESHOLD, DIV_THRESHOLD,
                     MIN_COVERAGE_YEARS, MIN_PASSING_YEARS)
-from utils import sep, find_col_in, estimate_dividend_yield
+from utils import sep, find_col_in, estimate_dividend_yield, pick_annual_row
 
 
 def fundamental_screening(
@@ -27,9 +27,17 @@ def fundamental_screening(
     dividend_df: pd.DataFrame,
     fin_start: int | None = None,
     fin_end: int | None = None,
+    bucket: str = "其他",
+    market_pe: float | None = None,
 ) -> dict:
     """执行基本面筛选，返回包含 screening 结果和财务指标表的字典。
-    fin_start/fin_end 默认回退到 config.FIN_START/FIN_END（--years 可覆盖）。"""
+    fin_start/fin_end 默认回退到 config.FIN_START/FIN_END（--years 可覆盖）。
+
+    item C2：bucket/market_pe 为可选参数，由 main.py 传入
+    （industry_info.get("bucket") 与 market_pe_history 末值），用于
+    estimate_dividend_yield 的行业分红率假设与隐含市值口径，向后兼容。
+    item C3：年内取数改用 pick_annual_row（年报优先），季报年透明标注于
+    '报告期类型' 列（仅标注不改值，不影响评分 _completeness 的 real 占比）。"""
     sep("第一步：基本面筛选（质量评估）")
 
     fin_start = fin_start if fin_start is not None else FIN_START
@@ -72,10 +80,19 @@ def fundamental_screening(
                 "经营现金流/净利润": None,
                 "股息率(%)": None,
                 "分红来源": None,
+                "报告期类型": None,
             })
             continue
 
-        row = year_data.sort_values(year_data.columns[0]).iloc[-1]
+        # item C3：年报优先（dt.month==12）；否则取年内最大日期行（季报），透明标注
+        row, is_annual = pick_annual_row(year_data, date_col)
+        if row is None:
+            # date_col 无法解析该行日期时回退旧逻辑，避免取数中断
+            row = year_data.sort_values(date_col).iloc[-1]
+            is_annual = True
+        report_type = "年报" if is_annual else "季报*"
+        if not is_annual:
+            print(f"  [!] {year} 年仅季报，数据待年报")
 
         roe_val = _safe_pct(row, roe_col)
         debt_val = _safe_pct(row, debt_col)
@@ -91,7 +108,8 @@ def fundamental_screening(
                 pass
 
         div_yield, div_source = estimate_dividend_yield(
-            year, row, equity_col, dividend_df, daily_df, roe_col, np_col
+            year, row, equity_col, dividend_df, daily_df, roe_col, np_col,
+            bucket=bucket, market_pe=market_pe,
         )
 
         results.append({
@@ -101,6 +119,7 @@ def fundamental_screening(
             "经营现金流/净利润": round(ocf_ratio, 2) if ocf_ratio is not None else None,
             "股息率(%)": round(div_yield, 2) if div_yield else None,
             "分红来源": div_source,
+            "报告期类型": report_type,
         })
 
     # -- 打印结果 --

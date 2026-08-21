@@ -6,6 +6,7 @@ from .helpers import (
     sep,
     try_fetch,
     find_col_in,
+    pick_annual_row,
     estimate_dividend_yield,
     generate_historical_erp,
 )
@@ -16,6 +17,7 @@ __all__ = [
     "sep",
     "try_fetch",
     "find_col_in",
+    "pick_annual_row",
     "estimate_dividend_yield",
     "generate_historical_erp",
     "percentile_of_score",

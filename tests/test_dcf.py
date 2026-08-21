@@ -8,6 +8,7 @@ DCF 估值测试（成熟期「老登股」口径 + 行业画像）：
   显性增长率由净利 CAGR 推导、基期 FCF 加权含负值、总股本无兜底 None 守卫。
 """
 import numpy as np
+import pandas as pd
 
 import analysis.step2_dcf as dcf_mod
 from analysis import dcf_valuation
@@ -344,3 +345,52 @@ def test_wacc_le_perp_guard_skips_scenario(ctx, fin_abstract, cashflow_df, daily
     assert dcf["valuations"]["破产清算 (Liquidation)"]["intrinsic_value"] > 0
     # 阶梯仍单调
     assert dcf["liquidation"] <= dcf["conservative"]
+
+
+# -- item C3：仅季报年份透明标注（non_annual_years 接口）-------------------
+
+def test_non_annual_years_reported_when_only_quarterly(ctx, fin_abstract, cashflow_df,
+                                                       daily_df, stock_indicator):
+    """item C3：某年财务摘要 + 现金流表均仅季报（报告期月≠12）→ 该年进 non_annual_years。
+    把 2023 的 12-31 改为 09-30（模拟数据源当年仅返回到三季报），透明标注不改值，
+    估值仍可正常完成（季报数据照用）。"""
+    fa = fin_abstract.copy()
+    cf = cashflow_df.copy()
+    # 财务摘要 2023 → 季报
+    fa["报告期"] = pd.to_datetime(fa["报告期"])
+    fa.loc[fa["报告期"].dt.year == 2023, "报告期"] = pd.Timestamp("2023-09-30")
+    # 现金流表 2023 → 季报
+    cf["报告期"] = pd.to_datetime(cf["报告期"])
+    cf.loc[cf["报告期"].dt.year == 2023, "报告期"] = pd.Timestamp("2023-09-30")
+
+    dcf = dcf_valuation(ctx.symbol, fa, cf, daily_df, stock_indicator=stock_indicator)
+    assert "non_annual_years" in dcf
+    assert 2023 in dcf["non_annual_years"]
+    # 其余年仍为年报 → 不在列表
+    assert dcf["non_annual_years"] == [2023]
+    # 估值仍可正常完成（季报数据被采用，不中断取数）
+    assert dcf["valuations"] is not None
+    assert dcf["base_fcf"] is not None and dcf["base_fcf"] > 0
+
+
+def test_non_annual_years_empty_when_all_annual(ctx, fin_abstract, cashflow_df,
+                                                daily_df, stock_indicator):
+    """item C3：demo 数据全部为年报（12-31）→ non_annual_years 为空列表（零回归）。"""
+    dcf = dcf_valuation(ctx.symbol, fin_abstract, cashflow_df, daily_df,
+                        stock_indicator=stock_indicator)
+    assert "non_annual_years" in dcf
+    assert dcf["non_annual_years"] == []
+
+
+def test_non_annual_years_present_in_no_shares_return(ctx, fin_abstract, cashflow_df,
+                                                      daily_df, stock_indicator):
+    """item C3：总股本守卫早退（无 total_shares）时返回 dict 也含 non_annual_years 接口。"""
+    fa = fin_abstract.drop(columns=[c for c in fin_abstract.columns if "总股本" in str(c)])
+    fa["报告期"] = pd.to_datetime(fa["报告期"])
+    fa.loc[fa["报告期"].dt.year == 2024, "报告期"] = pd.Timestamp("2024-09-30")
+    dcf = dcf_valuation(ctx.symbol, fa, cashflow_df, daily_df,
+                        stock_indicator=stock_indicator)
+    assert dcf["total_shares"] is None
+    assert dcf["valuations"] is None
+    assert "non_annual_years" in dcf
+    assert 2024 in dcf["non_annual_years"]

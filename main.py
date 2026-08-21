@@ -105,8 +105,25 @@ def main(ctx: StockContext, *, quiet: bool = False) -> dict:
         industry_info   = fetch_industry_info(ctx.symbol)
 
     # -- 2. Step 1：基本面筛选 --
+    # item C2：传入行业桶（行业分红率假设）与市场 PE（隐含市值口径）。
+    # market_pe 取 market_pe_history 末值；取不到传 None（estimate_dividend_yield
+    # 内部回退 20）。industry_info 在 demo / live 两分支均可用。
+    market_pe = None
+    if market_pe_history is not None and not market_pe_history.empty:
+        try:
+            pe_col_mp = next((c for c in market_pe_history.columns if "市盈率" in str(c)), None)
+            if pe_col_mp is not None:
+                pe_s_mp = pd.to_numeric(market_pe_history[pe_col_mp], errors="coerce")
+                pe_s_mp = pe_s_mp[(pe_s_mp > 0) & (pe_s_mp < 500)].dropna()
+                if len(pe_s_mp) > 0:
+                    market_pe = float(pe_s_mp.iloc[-1])
+        except Exception:
+            market_pe = None
+
     screening = fundamental_screening(ctx.symbol, fin_abstract, daily_df, dividend_df,
-                                       ctx.fin_start, ctx.fin_end)
+                                       ctx.fin_start, ctx.fin_end,
+                                       bucket=(industry_info or {}).get("bucket") or "其他",
+                                       market_pe=market_pe)
 
     # -- 3. Step 2：DCF 估值（行业画像决定参数 / EPS 算法 / 总股本来源）--
     dcf_result = dcf_valuation(ctx.symbol, fin_abstract, cashflow_df, daily_df,

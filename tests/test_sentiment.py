@@ -120,3 +120,86 @@ def test_erp_source_synthetic():
     """item 10：无市场 PE 历史 → 回退合成分布 → erp_source='synthetic'。"""
     s = market_sentiment(None, 0.023, None)
     assert s["erp_source"] == "synthetic"
+
+
+# -- item C1：个股 PE/PB 滚动窗口分位 ------------------------------------
+
+def test_individual_pe_rolling_window_drift_aware():
+    """item C1：估值中枢长期漂移时，滚动 5 年窗口分位 ≠ 全历史分位且更合理。
+    构造 11 年 PE 序列：前 5 年(2015-2019)中枢 ~20、后 6 年(2020-2025)中枢 ~8
+    （如银行 PE 从 20→5）。当前末值 8.5 在全历史里偏低（陈旧高中枢拉高整体 →
+    8.5 被判"便宜"），但在近 5 年窗口里偏高（新中枢 ~8）→ 滚动分位 > 全历史分位，
+    反映当前相对近期中枢而非陈旧中枢。5 年窗口恰好覆盖后 6 期（cutoff=2020-12-31），
+    旧中枢 5 期被排除。
+    """
+    import config
+    from analysis.step3_sentiment import _recent_window
+    from utils import percentile_of_score
+
+    pe_old = [18.0, 19.0, 20.0, 21.0, 22.0]      # 2015-2019：中枢 ~20（陈旧）
+    pe_new = [6.0, 7.0, 8.0, 8.0, 9.0, 8.5]     # 2020-2025：中枢 ~8（含末值 8.5）
+    pe_vals = pe_old + pe_new
+    dates = pd.date_range("2015-01-31", periods=len(pe_vals), freq="YE")
+    si = pd.DataFrame({"日期": dates, "市盈率PE": pe_vals, "市净率PB": [p / 20 for p in pe_vals]})
+
+    # 末值 = 8.5
+    pe_s = pd.to_numeric(si["市盈率PE"], errors="coerce")
+    pe_s = pe_s[(pe_s > 0) & (pe_s < 1000)].dropna()
+    current_pe = float(pe_s.iloc[-1])
+    assert abs(current_pe - 8.5) < 1e-9
+
+    # 滚动窗口（cutoff=2020-12-31 → 恰好覆盖后 6 期新中枢，旧 5 期被排除）
+    pe_win, used_full = _recent_window(pe_s, si["日期"], config.INDIVIDUAL_PERCENTILE_WINDOW_YEARS)
+    assert used_full is False
+    assert len(pe_win) == 6                       # 后 6 期新中枢
+    assert all(v < 10.0 for v in pe_win.tolist())  # 旧中枢（~20）已全部排除
+    pct_window = percentile_of_score(pe_win.tolist(), current_pe)
+    pct_full = percentile_of_score(pe_s.tolist(), current_pe)
+    # 核心：滚动分位 > 全历史分位（当前值在近 5 年偏高，在全历史偏低）
+    assert pct_window > pct_full
+    # 合理性：滚动窗口分位偏高（>50，8.5 在新中枢里属偏高），全历史分位偏低（<50）
+    assert pct_window > 50.0
+    assert pct_full < 50.0
+
+
+def test_individual_pe_window_insufficient_falls_back_to_full():
+    """item C1：窗口内不足 2 期 → 回退全历史，used_full=True。
+    两个数据点跨度 14 年（2010 vs 2024），5 年窗口 cutoff=2019-12-31 仅含 2024 一期
+    （<2）→ 回退全历史 2 期。
+    """
+    import config
+    from analysis.step3_sentiment import _recent_window
+
+    pe_vals = [20.0, 8.0]
+    dates = pd.to_datetime(["2010-12-31", "2024-12-31"])
+    si = pd.DataFrame({"日期": dates, "市盈率PE": pe_vals})
+    pe_s = pd.to_numeric(si["市盈率PE"], errors="coerce").dropna()
+
+    pe_win, used_full = _recent_window(pe_s, si["日期"], config.INDIVIDUAL_PERCENTILE_WINDOW_YEARS)
+    assert used_full is True
+    assert len(pe_win) == 2                        # 回退全历史
+
+
+def test_individual_pe_index_alignment_after_dropna():
+    """item C1：series 经过前置 dropna/过滤后与 date_series 长度/索引不一致，
+    _recent_window 须按共同行对齐，保证日期与数值一一对应（回归守护）。
+    构造含 NaN 的 PE，使其 dropna 后短于日期列，验证不串位。"""
+    import config
+    from analysis.step3_sentiment import _recent_window
+    from utils import percentile_of_score
+
+    # 中间一行为 NaN；dropna 后 pe_s 长度 = 9，dates 长度 = 10（索引不对齐）
+    pe_vals = [10, 11, 12, None, 8, 9, 8.5, 9, 8, 8.5]
+    dates = pd.date_range("2016-01-31", periods=10, freq="YE")
+    si = pd.DataFrame({"日期": dates, "市盈率PE": pe_vals})
+    pe_s = pd.to_numeric(si["市盈率PE"], errors="coerce")
+    pe_s = pe_s[(pe_s > 0) & (pe_s < 1000)].dropna()
+    assert len(pe_s) == 9                       # 掉了 NaN 那行
+
+    pe_win, used_full = _recent_window(pe_s, si["日期"], config.INDIVIDUAL_PERCENTILE_WINDOW_YEARS)
+    # 近 5 年窗口内有值且未回退全历史（末值 8.5 在近 5 年偏高）
+    assert used_full is False
+    current_pe = float(pe_s.iloc[-1])
+    pct_window = percentile_of_score(pe_win.tolist(), current_pe)
+    pct_full = percentile_of_score(pe_s.tolist(), current_pe)
+    assert pct_window > pct_full

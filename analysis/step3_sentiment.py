@@ -24,6 +24,7 @@ generate_historical_erp()。个股自身 PE/PB 历史分位由 stock_indicator �
 import numpy as np
 import pandas as pd
 
+from config import INDIVIDUAL_PERCENTILE_WINDOW_YEARS
 from utils import sep, find_col_in, generate_historical_erp, percentile_of_score
 
 
@@ -77,6 +78,35 @@ def _historical_erp_series(market_pe_history: pd.DataFrame | None,
     erp = erp[(erp > 0) & (erp < 1)]                          # 过滤异常 ERP
     out = erp.tolist()
     return (out if len(out) >= 2 else None, used_real_bond)
+
+
+def _recent_window(series: pd.Series, date_series: pd.Series,
+                   window_years: int) -> tuple[pd.Series, bool]:
+    """
+    按报告日期取最近 window_years 年的子序列（item C1）。
+
+    估值中枢长期漂移时，全历史分位会失真（如银行 PE 从 20→5）。改用近 N 年
+    滚动窗口与市场 ERP 口径统一。当前值仍取末值（调用方负责取末值）。
+
+    series 与 date_series 可能因前置 dropna 长度不一致、索引不对齐，此处按
+    共同索引对齐后一并 dropna，保证日期与数值一一对应。
+
+    返回 (windowed_series, used_full_history)：
+      - windowed_series：窗口内数值序列；窗口内不足 2 期（或无可用日期）时
+        回退全历史非空序列。
+      - used_full_history：是否回退了全历史（调用方据此打印 [!] 提醒）。
+    """
+    full = pd.to_numeric(series, errors="coerce").dropna()
+    df = pd.DataFrame({"v": series, "d": date_series})
+    df["d"] = pd.to_datetime(df["d"], errors="coerce")
+    df = df.dropna(subset=["v", "d"])
+    if len(df) >= 2:
+        latest = df["d"].max()
+        cutoff = latest - pd.DateOffset(years=window_years)
+        windowed = df[df["d"] >= cutoff]["v"]
+        if len(windowed) >= 2:
+            return windowed, False
+    return full, True
 
 
 def market_sentiment(market_df: pd.DataFrame | None,
@@ -177,27 +207,47 @@ def market_sentiment(market_df: pd.DataFrame | None,
     # -- 个股自身 PE/PB 历史分位（真实分位）--
     # 分位含义：高 = 当前估值处于历史高位 = 偏贵；低 = 偏便宜。
     # current_pe/current_pb 暴露当前值供评分层 PB-ROE 锚使用（item 8）。
+    # item C1：分位改用近 N 年滚动窗口（与市场 ERP 口径统一，避免估值中枢
+    # 长期漂移使全历史分位失真）；窗口不足 2 期回退全历史。
     pe_percentile = None
     pb_percentile = None
     current_pe = None
     current_pb = None
     if stock_indicator is not None and not stock_indicator.empty:
-        print(f"\n  -- 个股自身估值分位（{len(stock_indicator)} 期历史）--")
+        date_col_si = find_col_in(["日期", "date", "trade_date"], stock_indicator)
+        print(f"\n  -- 个股自身估值分位（{len(stock_indicator)} 期历史，"
+              f"滚动 {INDIVIDUAL_PERCENTILE_WINDOW_YEARS} 年窗口）--")
         if "市盈率PE" in stock_indicator.columns:
-            pe_s = pd.to_numeric(stock_indicator["市盈率PE"], errors="coerce").dropna()
-            pe_s = pe_s[(pe_s > 0) & (pe_s < 1000)]
+            pe_s = pd.to_numeric(stock_indicator["市盈率PE"], errors="coerce")
+            pe_s = pe_s[(pe_s > 0) & (pe_s < 1000)].dropna()
             if len(pe_s) > 1:
                 current_pe = float(pe_s.iloc[-1])
-                pe_percentile = percentile_of_score(pe_s.tolist(), current_pe)
-                print(f"  [DATA] 当前 PE={current_pe:.2f}，处于自身历史 {pe_percentile:.1f}% 分位"
+                if date_col_si and date_col_si in stock_indicator.columns:
+                    pe_win, used_full = _recent_window(
+                        pe_s, stock_indicator[date_col_si], INDIVIDUAL_PERCENTILE_WINDOW_YEARS)
+                else:
+                    pe_win, used_full = pe_s, True
+                pe_percentile = percentile_of_score(pe_win.tolist(), current_pe)
+                if used_full:
+                    print(f"  [!] 个股 PE 分位窗口不足，回退全历史")
+                print(f"  [DATA] 当前 PE={current_pe:.2f}，处于自身近 "
+                      f"{INDIVIDUAL_PERCENTILE_WINDOW_YEARS} 年 {pe_percentile:.1f}% 分位"
                       f"（{ '偏贵' if pe_percentile > 60 else ('便宜' if pe_percentile < 40 else '合理')}）")
         if "市净率PB" in stock_indicator.columns:
-            pb_s = pd.to_numeric(stock_indicator["市净率PB"], errors="coerce").dropna()
-            pb_s = pb_s[(pb_s > 0) & (pb_s < 100)]
+            pb_s = pd.to_numeric(stock_indicator["市净率PB"], errors="coerce")
+            pb_s = pb_s[(pb_s > 0) & (pb_s < 100)].dropna()
             if len(pb_s) > 1:
                 current_pb = float(pb_s.iloc[-1])
-                pb_percentile = percentile_of_score(pb_s.tolist(), current_pb)
-                print(f"  [DATA] 当前 PB={current_pb:.3f}，处于自身历史 {pb_percentile:.1f}% 分位"
+                if date_col_si and date_col_si in stock_indicator.columns:
+                    pb_win, used_full = _recent_window(
+                        pb_s, stock_indicator[date_col_si], INDIVIDUAL_PERCENTILE_WINDOW_YEARS)
+                else:
+                    pb_win, used_full = pb_s, True
+                pb_percentile = percentile_of_score(pb_win.tolist(), current_pb)
+                if used_full:
+                    print(f"  [!] 个股 PB 分位窗口不足，回退全历史")
+                print(f"  [DATA] 当前 PB={current_pb:.3f}，处于自身近 "
+                      f"{INDIVIDUAL_PERCENTILE_WINDOW_YEARS} 年 {pb_percentile:.1f}% 分位"
                       f"（{ '偏贵' if pb_percentile > 60 else ('便宜' if pb_percentile < 40 else '合理')}）")
 
     return {

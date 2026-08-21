@@ -81,13 +81,30 @@ def test_industry_profiles_complete():
     """6 桶齐全且每桶画像字段完整（与 P2/P3b 消费契约一致）。"""
     assert set(INDUSTRY_PROFILES.keys()) == set(INDUSTRY_BUCKETS)
     required = {"wacc", "perpetual", "roe_benchmark", "is_financial", "eps_method",
-                "growth_clip", "capex_ratio"}
+                "growth_clip", "capex_ratio", "payout_ratio"}
     for bucket, profile in INDUSTRY_PROFILES.items():
         assert required.issubset(profile.keys()), f"{bucket} 缺字段: {required - set(profile.keys())}"
         assert profile["eps_method"] in ("normalized", "shiller"), f"{bucket} eps_method 非法"
         assert profile["growth_clip"] == DCF_GROWTH_CAGR_CLIP
         # capex_ratio 必须落在合理区间（0, 1）
         assert 0.0 < profile["capex_ratio"] < 1.0, f"{bucket} capex_ratio 越界"
+        # payout_ratio 必须落在合理区间（0, 1]（item C2）
+        assert 0.0 < profile["payout_ratio"] <= 1.0, f"{bucket} payout_ratio 越界"
+
+
+def test_payout_ratio_differentiated_by_bucket():
+    """payout_ratio 按行业差异化（item C2）：成长最低（再投资需求强）、消费最高。
+    去硬编码 0.30：成长股 0.15、消费股 0.40，避免一刀切高估成长股股息率。"""
+    assert INDUSTRY_PROFILES["成长"]["payout_ratio"] == 0.15     # 再投资需求强
+    assert INDUSTRY_PROFILES["消费"]["payout_ratio"] == 0.40     # 现金流稳、分红慷慨
+    assert INDUSTRY_PROFILES["周期"]["payout_ratio"] == 0.25
+    assert INDUSTRY_PROFILES["银行"]["payout_ratio"] == 0.30
+    assert INDUSTRY_PROFILES["非银金融"]["payout_ratio"] == 0.30
+    assert INDUSTRY_PROFILES["其他"]["payout_ratio"] == 0.30      # 兜底口径
+    # 单调：消费 > 兜底/金融 > 周期 > 成长
+    assert (INDUSTRY_PROFILES["消费"]["payout_ratio"]
+            > INDUSTRY_PROFILES["周期"]["payout_ratio"]
+            > INDUSTRY_PROFILES["成长"]["payout_ratio"])
 
 
 def test_capex_ratio_differentiated_by_bucket():

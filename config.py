@@ -100,14 +100,19 @@ SW_TO_BUCKET = {
 #   capex_ratio   —— capex 取不到时按 OCF 的该比例估算维持性支出（item A1）。
 #                    重资产（周期 0.45）高、轻资产（消费 0.15）低，避免固定 0.20
 #                    使重资产股 FCF 虚高、轻资产股 FCF 虚低污染 DCF 基数。
+#   payout_ratio  —— 分红率假设（item C2）：无真实分红记录时，按 ROE/净利润口径
+#                    估算股息率所用的行业典型分红率。capex/分红率等行业结构性
+#                    假设集中于此，便于一处校准。成长股低（0.15，留存再投资）、
+#                    消费股高（0.40，现金流稳健分红慷慨）、周期股低（0.25，景气
+#                    波动需保留现金）、金融 0.30（银行监管约束下稳定派息）。
 DCF_GROWTH_CAGR_CLIP = (-0.05, 0.12)
 INDUSTRY_PROFILES = {
-    "银行":    {"wacc": 0.095, "perpetual": 0.015, "roe_benchmark": 11.0, "is_financial": True,  "eps_method": "normalized", "growth_clip": DCF_GROWTH_CAGR_CLIP, "capex_ratio": 0.10},
-    "非银金融": {"wacc": 0.095, "perpetual": 0.015, "roe_benchmark": 12.0, "is_financial": True,  "eps_method": "normalized", "growth_clip": DCF_GROWTH_CAGR_CLIP, "capex_ratio": 0.10},
-    "消费":    {"wacc": 0.090, "perpetual": 0.020, "roe_benchmark": 15.0, "is_financial": False, "eps_method": "normalized", "growth_clip": DCF_GROWTH_CAGR_CLIP, "capex_ratio": 0.15},
-    "周期":    {"wacc": 0.100, "perpetual": 0.010, "roe_benchmark": 12.0, "is_financial": False, "eps_method": "shiller",    "growth_clip": DCF_GROWTH_CAGR_CLIP, "capex_ratio": 0.45},
-    "成长":    {"wacc": 0.085, "perpetual": 0.025, "roe_benchmark": 15.0, "is_financial": False, "eps_method": "normalized", "growth_clip": DCF_GROWTH_CAGR_CLIP, "capex_ratio": 0.25},
-    "其他":    {"wacc": 0.095, "perpetual": 0.015, "roe_benchmark": 15.0, "is_financial": False, "eps_method": "normalized", "growth_clip": DCF_GROWTH_CAGR_CLIP, "capex_ratio": 0.20},
+    "银行":    {"wacc": 0.095, "perpetual": 0.015, "roe_benchmark": 11.0, "is_financial": True,  "eps_method": "normalized", "growth_clip": DCF_GROWTH_CAGR_CLIP, "capex_ratio": 0.10, "payout_ratio": 0.30},
+    "非银金融": {"wacc": 0.095, "perpetual": 0.015, "roe_benchmark": 12.0, "is_financial": True,  "eps_method": "normalized", "growth_clip": DCF_GROWTH_CAGR_CLIP, "capex_ratio": 0.10, "payout_ratio": 0.30},
+    "消费":    {"wacc": 0.090, "perpetual": 0.020, "roe_benchmark": 15.0, "is_financial": False, "eps_method": "normalized", "growth_clip": DCF_GROWTH_CAGR_CLIP, "capex_ratio": 0.15, "payout_ratio": 0.40},
+    "周期":    {"wacc": 0.100, "perpetual": 0.010, "roe_benchmark": 12.0, "is_financial": False, "eps_method": "shiller",    "growth_clip": DCF_GROWTH_CAGR_CLIP, "capex_ratio": 0.45, "payout_ratio": 0.25},
+    "成长":    {"wacc": 0.085, "perpetual": 0.025, "roe_benchmark": 15.0, "is_financial": False, "eps_method": "normalized", "growth_clip": DCF_GROWTH_CAGR_CLIP, "capex_ratio": 0.25, "payout_ratio": 0.15},
+    "其他":    {"wacc": 0.095, "perpetual": 0.015, "roe_benchmark": 15.0, "is_financial": False, "eps_method": "normalized", "growth_clip": DCF_GROWTH_CAGR_CLIP, "capex_ratio": 0.20, "payout_ratio": 0.30},
 }
 
 # 行业信息磁盘缓存 TTL（行业归属 + 总股本，月级稳定）
@@ -189,6 +194,12 @@ BOND_HISTORY_TTL_HOURS = 24  # 国债收益率历史（日级）
 MARKET_PE_BOARD       = "上证"
 # 市场情绪历史 ERP 回退天数（与国债历史对齐的窗口）
 SENTIMENT_HISTORY_DAYS = 365 * 10   # 近 10 年（item 12：扩窗以稳定分位估计）
+
+# 个股自身 PE/PB 历史分位的滚动窗口年数（item C1）。
+# 与市场 ERP 窗口思路一致：全历史分位会因估值中枢长期漂移而失真
+# （如银行 PE 从 20→5，当前 5 倍在全历史里是极低分位 → "极度便宜"，
+# 但相对近年中枢未必便宜）。改用近 N 年滚动窗口求分位，窗口不足回退全历史。
+INDIVIDUAL_PERCENTILE_WINDOW_YEARS = 5
 
 
 # -- 贯穿调用链的上下文（去全局化的地基）------------------
