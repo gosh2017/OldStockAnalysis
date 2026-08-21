@@ -18,6 +18,7 @@ import io
 import re
 from contextlib import redirect_stdout
 
+import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
@@ -136,6 +137,10 @@ def sensitivity_figure(sensitivity, price=None):
     if grid is None or grid.empty:
         return None
     z = grid.values
+    finite = z[np.isfinite(z)]
+    if finite.size == 0:
+        return None
+    vmin, vmax = float(np.nanmin(finite)), float(np.nanmax(finite))
     fig = go.Figure()
     fig.add_trace(go.Heatmap(
         z=z, x=list(grid.columns), y=list(grid.index),
@@ -145,15 +150,34 @@ def sensitivity_figure(sensitivity, price=None):
         hovertemplate="永续 %{y} × WACC %{x}<br>内在价值 %{z:.2f} 元<extra></extra>",
         colorbar=dict(title="元/股"),
     ))
-    if price and price > 0:
+    # 现价分界：落在网格值域内才画等值线（plotly Contour 同样无法在值域外渲染），
+    # 超界时改用图角标注传达现价与"全面高估/低估"的判定。
+    price_in_range = bool(price and price > 0 and vmin < price < vmax)
+    if price_in_range:
         fig.add_trace(go.Contour(
             z=z, x=list(grid.columns), y=list(grid.index),
             contours=dict(start=price, end=price, size=1),
             line=dict(color=COLORS["cons"], width=2.5, dash="dash"),
             showscale=False, name=f"现价 {price:.2f}",
         ))
+    if price and price > 0:
+        if price_in_range:
+            note = f"现价 {price:.2f} 元 · 红线左下侧（内在价值 > 现价）= 买入区"
+        elif price >= vmax:
+            note = (f"现价 {price:.2f} 元 ≥ 网格上限 {vmax:.2f} · "
+                    f"全参数下内在价值 < 现价 → 全面高估")
+        else:  # price <= vmin
+            note = (f"现价 {price:.2f} 元 ≤ 网格下限 {vmin:.2f} · "
+                    f"全参数下内在价值 > 现价 → 全面低估")
+        fig.add_annotation(
+            text=note, xref="paper", yref="paper", x=1.0, y=1.0,
+            xanchor="right", yanchor="top", showarrow=False,
+            font=dict(color=COLORS["cons"], size=12),
+            bgcolor="rgba(255,255,255,0.85)", bordercolor=COLORS["cons"],
+            borderwidth=1, borderpad=4,
+        )
     fig.update_layout(xaxis_title="折现率 WACC", yaxis_title="永续增长率",
-                      height=440, margin=dict(t=20))
+                      height=440, margin=dict(t=20, r=20))
     return fig
 
 

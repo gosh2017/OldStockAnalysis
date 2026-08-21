@@ -22,6 +22,9 @@
 - **(B3) 资产负债率用近 1 年值**：子分由历史 `max` 改用 `iloc[-1]`（table 已按年排序，末行即最新年），反映当前杠杆而非历史峰值。
 - **(B4) OCF 质量用中位数**：经营现金流-净利润比由均值改用中位数，抗亏损年极值；比例 ≥1 → 100 的 clip 不变。
 
+### 修复
+- **DCF 敏感性图现价标注**：`plot_sensitivity_heatmap`（matplotlib）与 `sensitivity_figure`（plotly / Streamlit）现价落在网格值域 `[vmin, vmax]` 外时不再丢失现价。等值线（"内在价值=现价"分界）仅当现价落在值域内绘制；超界时改由 colorbar 端点标记（matplotlib，夹至端点 + 方向注）或图角标注（plotly）呈现现价位置，并据"全参数下内在价值 ＜ / ＞ 现价"标注「全面高估 / 全面低估」，标题同步说明买入区 / 高估 / 低估语义（老登股现价常超出 DCF 内在价值区间，此前等值线画不出致现价从图上消失）。
+
 ### 文档
 - config.py 模块顶部新增 README「行业分桶」导航注释，串联 INDUSTRY_BUCKETS / SW_TO_BUCKET / INDUSTRY_PROFILES 与 `tests/test_industry.py`。
 - README 同步行业分桶重构：新增「行业分桶」小节、更新 DCF/评分口径、重写「已知限定」（总股本不再 197.56 亿硬兜底）。

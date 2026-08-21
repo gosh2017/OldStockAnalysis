@@ -162,8 +162,10 @@ def plot_sensitivity_heatmap(sensitivity: dict, ctx, price: float | None = None)
     绘制 DCF 敏感性热力图（增长率 × WACC → 每股内在价值）。
 
     单色顺序型色阶（蓝，light→dark = 低→高内在价值）；每格标注数值；
-    若提供当前股价 price，叠一条红色等值线标出"内在价值 = 现价"的
-    买/卖分界（线内高于现价=买入区，线外=高估区）。
+    若提供当前股价 price，在 colorbar 上标出其位置，并尽量叠一条红色
+    等值线标"内在价值 = 现价"的买/卖分界（线左下侧内在价值 > 现价 = 买入区）。
+    现价落在网格值域 [vmin, vmax] 外时等值线无法绘制，改由 colorbar 端点
+    标注 + 标题说明（全面高估 / 全面低估）传达现价的相对位置。
     """
     grid = sensitivity.get("grid") if sensitivity else None
     if grid is None or grid.empty:
@@ -194,8 +196,11 @@ def plot_sensitivity_heatmap(sensitivity: dict, ctx, price: float | None = None)
             ax.text(j, i, f"{v:.1f}", ha="center", va="center",
                     fontsize=6.5, color=txt_color)
 
-    # 等值线标出"内在价值 = 现价"的买/卖分界
-    if price and price > 0 and vmin < price < vmax:
+    # 等值线标出"内在价值 = 现价"的买/卖分界。
+    # matplotlib contour 无法在数据值域 [vmin, vmax] 之外画等值线，故仅当
+    # 现价落在网格值域内时画线；超界时改由 colorbar 端点标注 + 标题说明传达。
+    price_in_range = bool(price and price > 0 and vmin < price < vmax)
+    if price_in_range:
         cs = ax.contour(data, levels=[price], colors="#d32f2f",
                         linewidths=1.8, linestyles="--")
         ax.clabel(cs, fmt=f"现价 {price:.2f}", fontsize=8, colors="#d32f2f")
@@ -207,10 +212,33 @@ def plot_sensitivity_heatmap(sensitivity: dict, ctx, price: float | None = None)
     ax.set_xlabel("折现率 WACC", fontsize=11)
     ax.set_ylabel("永续增长率", fontsize=11)
     title = f"{ctx.name}（{ctx.symbol}）DCF 敏感性 — 每股内在价值（元）"
-    if price:
-        title += f"\n现价 {price:.2f} 元 · 红线左下侧（内在价值 > 现价）= 买入区"
+    if price and price > 0:
+        if price_in_range:
+            title += f"\n现价 {price:.2f} 元 · 红线左下侧（内在价值 > 现价）= 买入区"
+        elif price >= vmax:
+            title += (f"\n现价 {price:.2f} 元 ≥ 网格上限 {vmax:.2f} · "
+                     f"全参数下内在价值 < 现价 → 全面高估")
+        else:  # price <= vmin
+            title += (f"\n现价 {price:.2f} 元 ≤ 网格下限 {vmin:.2f} · "
+                     f"全参数下内在价值 > 现价 → 全面低估")
     ax.set_title(title, fontsize=12, fontweight="bold")
-    fig.colorbar(im, ax=ax, label="每股内在价值（元）")
+    cbar = fig.colorbar(im, ax=ax, label="每股内在价值（元）")
+    # colorbar 始终标出现价：范围内画在真值处，超界时夹到端点并注明方向，
+    # 确保现价无论是否落在网格值域内都能在图上看到其相对位置。
+    if price and price > 0:
+        clamped = min(max(price, vmin), vmax)
+        cbar.ax.axhline(clamped, color="#d32f2f", lw=2.0, ls="--")
+        if price >= vmax:
+            va, note = "top", f"现价\n{price:.2f}"
+        elif price <= vmin:
+            va, note = "bottom", f"现价\n{price:.2f}"
+        else:
+            va, note = "center", f"现价 {price:.2f}"
+        cbar.ax.text(0.5, clamped, note,
+                     transform=cbar.ax.get_yaxis_transform(),
+                     ha="center", va=va, fontsize=8, color="#d32f2f",
+                     bbox=dict(facecolor="white", edgecolor="#d32f2f",
+                               boxstyle="round,pad=0.2", alpha=0.9))
     ax.invert_yaxis()  # 低增长率在上方，符合表格阅读习惯
 
     fig.tight_layout()
