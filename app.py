@@ -519,6 +519,27 @@ with st.sidebar:
         sel = st.selectbox(f"匹配到 {len(matches)} 只，选择标的", labels, index=0)
         idx = labels.index(sel) if sel in labels else 0
         code, name = matches[idx][0], matches[idx][1]
+        st.caption(f"已选：{name}（{code}）")
+        _c1, _c2 = st.columns(2)
+        _pair_key = f"{code},{name}"
+        if "batch_stocks" not in st.session_state:
+            st.session_state["batch_stocks"] = []
+        if "backtest_stocks" not in st.session_state:
+            st.session_state["backtest_stocks"] = []
+        with _c1:
+            if st.button("➕ 批量排名", use_container_width=True):
+                if _pair_key not in st.session_state["batch_stocks"]:
+                    st.session_state["batch_stocks"].append(_pair_key)
+                    st.rerun()
+                else:
+                    st.info(f"{name} 已在批量排名清单中", icon="ℹ️")
+        with _c2:
+            if st.button("➕ 历史回测", use_container_width=True):
+                if _pair_key not in st.session_state["backtest_stocks"]:
+                    st.session_state["backtest_stocks"].append(_pair_key)
+                    st.rerun()
+                else:
+                    st.info(f"{name} 已在历史回测清单中", icon="ℹ️")
     elif (not demo and stock_list is None
           and str(query).strip().isdigit() and len(str(query).strip()) == 6):
         # 列表不可用时，允许直接输入 6 位代码兜底（不依赖 stock_list 匹配）
@@ -545,6 +566,28 @@ with st.sidebar:
         else:
             st.error("请先选择一个标的")
     st.divider()
+    # -- 已添加至清单的标的（批量排名 / 历史回测）--
+    st.caption("📋 已添加标的")
+    for _lst_key, _label in [("batch_stocks", "批量排名"), ("backtest_stocks", "历史回测")]:
+        _lst = st.session_state.setdefault(_lst_key, [])
+        if _lst:
+            with st.expander(f"{_label}（{len(_lst)} 只）", expanded=False):
+                _to_remove = []
+                for _i, _pair in enumerate(_lst):
+                    _cc, _cn = _pair.split(",", 1)
+                    _l = st.columns([4, 1])
+                    _l[0].caption(f"{_cc},{_cn}")
+                    _b = _l[1].button("❌", key=f"rm_{_lst_key}_{_i}", use_container_width=True)
+                    if _b:
+                        _to_remove.append(_i)
+                for _i in reversed(_to_remove):
+                    _lst.pop(_i)
+                if _to_remove:
+                    st.rerun()  # 重跑以刷新清单
+        else:
+            with st.expander(f"{_label}（空）", expanded=False):
+                st.caption("在上方搜索股票后点「➕ 批量排名 / ➕ 历史回测」添加。")
+    st.divider()
     st.caption("实盘模式需联网与 AkShare；Demo 模式数据为模拟，非真实行情。")
 
 tab_single, tab_batch, tab_backtest = st.tabs(["单股分析", "批量排名", "历史回测"])
@@ -558,15 +601,18 @@ with tab_single:
 with tab_batch:
     st.markdown("对多只标的逐只打分并按综合评分排序。")
     st.caption("当前模式：" + ("Demo（离线模拟数据）" if demo else "在线（逐只联网分析，较慢）")
-               + "。可在左侧栏切换 Demo 模式；在线模式留空用内置清单亦可逐只联网打分。")
+               + "。可在左侧栏切换 Demo 模式；左侧栏搜索后可直接添加至本清单，或在此手动编辑。")
+    _batch_pre = "\n".join(st.session_state.get("batch_stocks", []))
+    _batch_val = _batch_pre if _batch_pre.strip() else _batch_default_text()
     batch_text = st.text_area(
         "批量标的（每行 `代码,名称` 或仅 `代码`；留空用内置清单）",
-        value=_batch_default_text(), height=120,
+        value=_batch_val, height=120,
         help="每行一只标的，格式 `代码,名称` 或仅代码；# 开头为注释。留空则用内置清单。",
     )
     btn_label = "▶ 运行批量打分" + ("（Demo）" if demo else "（在线逐只联网）")
     if st.button(btn_label, type="primary"):
-        items = _parse_batch_text(batch_text) if batch_text.strip() else BATCH_DEMO_LIST
+        _src = batch_text if batch_text.strip() else _batch_pre
+        items = _parse_batch_text(_src) if _src.strip() else BATCH_DEMO_LIST
         if not items:
             st.error("未解析到任何标的，请按每行 `代码,名称` 输入。")
         else:
@@ -588,34 +634,49 @@ with tab_backtest:
     bt_end_year = int(END_DATE[:4])
     p1, p2, p3, p4 = st.columns(4)
     bt_start_year = p1.number_input("回测起始年", min_value=2010, max_value=bt_end_year,
-                                    value=bt_end_year - BACKTEST_LOOKBACK_YEARS)
+                                    value=bt_end_year - BACKTEST_LOOKBACK_YEARS,
+                                    help="回测区间起始年份（数据需覆盖该年起）")
     bt_end_in = p2.number_input("回测结束年", min_value=2010, max_value=bt_end_year,
-                                value=bt_end_year)
-    freq_opts = ["M", "Q", "Y"]
-    freq = p3.selectbox("调仓频率", freq_opts,
-                        index=freq_opts.index(BACKTEST_REBALANCE_FREQ))
-    grade_opts = ["A", "B", "C", "D"]
-    min_grade = p4.selectbox("最低入选等级", grade_opts,
-                             index=grade_opts.index(BACKTEST_MIN_GRADE))
+                                value=bt_end_year,
+                                help="回测区间结束年份（含该年全年数据）")
+    _freq_map = {"M": "M（每月 Monthly）", "Q": "Q（每季 Quarterly）", "Y": "Y（每年 Yearly）"}
+    _grade_map = {"A": "A（最优）", "B": "B（良好）", "C": "C（一般）", "D": "D（较差）"}
+    _weight_map = {"equal": "equal（等权）", "score": "score（按评分加权）"}
+    freq_label = p3.selectbox("调仓频率", list(_freq_map.values()),
+                              index=list(_freq_map.keys()).index(BACKTEST_REBALANCE_FREQ),
+                              help="调仓频率：M=每月 / Q=每季度 / Y=每年")
+    freq = list(_freq_map.keys())[list(_freq_map.values()).index(freq_label)]
+    min_grade_label = p4.selectbox("最低入选等级", list(_grade_map.values()),
+                                   index=list(_grade_map.keys()).index(BACKTEST_MIN_GRADE),
+                                   help="仅纳入综合评分 ≥ 该等级的个股（A 最严 → D 最宽）")
+    min_grade = list(_grade_map.keys())[list(_grade_map.values()).index(min_grade_label)]
     q1, q2, q3, q4 = st.columns(4)
     top_n = int(q1.number_input("每期 top_n", min_value=1, max_value=50,
-                                value=BACKTEST_TOP_N, step=1))
-    w_opts = ["equal", "score"]
-    weight = q2.selectbox("组合权重", w_opts, index=w_opts.index(BACKTEST_WEIGHT))
+                                value=BACKTEST_TOP_N, step=1,
+                                help="每次调仓入选的标的数量（按评分从高到低取前 N）"))
+    weight_label = q2.selectbox("组合权重", list(_weight_map.values()),
+                                index=list(_weight_map.keys()).index(BACKTEST_WEIGHT),
+                                help="等权=各标的均分资金 / 按评分加权=分高权重更大")
+    weight = list(_weight_map.keys())[list(_weight_map.values()).index(weight_label)]
     txn = q3.number_input("单边交易成本(%)", min_value=0.0, max_value=2.0,
-                          value=BACKTEST_TXN_COST * 100, step=0.05) / 100.0
+                          value=BACKTEST_TXN_COST * 100, step=0.05,
+                          help="单次买入或卖出收取的交易成本（含佣金/印花税/冲击成本的近似）") / 100.0
     hold = int(q4.number_input("持有期(交易日,0=至下期)", min_value=0, max_value=252,
-                               value=BACKTEST_HOLD_PERIOD or 0, step=1))
+                               value=BACKTEST_HOLD_PERIOD or 0, step=1,
+                               help="调仓后固定持有天数再卖出；0 表示持有至下一调仓日才卖出"))
     hold_days = None if hold == 0 else hold
 
+    _bt_pre = "\n".join(st.session_state.get("backtest_stocks", []))
+    _bt_val = _bt_pre if _bt_pre.strip() else _batch_default_text()
     bt_text = st.text_area(
         "标的清单（每行 `代码,名称` 或仅 `代码`；留空用内置清单）",
-        value=_batch_default_text(), height=120, key="bt_symbols",
-        help="每行一只标的，格式 `代码,名称` 或仅代码；# 开头为注释。留空则用内置清单。",
+        value=_bt_val, height=120, key="bt_symbols",
+        help="每行一只标的，格式 `代码,名称` 或仅代码；# 开头为注释。留空则用内置清单。左侧栏搜索后可直接添加至本清单。",
     )
     bt_label = "▶ 运行回测" + ("（Demo）" if demo else "（在线逐只联网预取）")
     if st.button(bt_label, type="primary"):
-        items = _parse_batch_text(bt_text) if bt_text.strip() else BATCH_DEMO_LIST
+        _btp = _parse_batch_text(bt_text) if bt_text.strip() else _parse_batch_text(_bt_pre)
+        items = _btp if _btp else BATCH_DEMO_LIST
         if not items:
             st.error("未解析到任何标的，请按每行 `代码,名称` 输入。")
         else:
