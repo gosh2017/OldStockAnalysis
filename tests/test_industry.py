@@ -11,6 +11,7 @@
 from config import (
     INDUSTRY_BUCKETS, SW_TO_BUCKET, INDUSTRY_PROFILES, DCF_GROWTH_CAGR_CLIP,
     INDUSTRY_INFO_TTL_HOURS, MIN_PASSING_YEARS, SCENARIOS,
+    EQUITY_RISK_PREMIUM, RISK_FREE_REFERENCE,
 )
 from data import map_to_industry_bucket, generate_industry_info, generate_all_demo_data
 from config import StockContext
@@ -80,7 +81,7 @@ def test_generate_all_demo_data_has_industry_key(ctx):
 def test_industry_profiles_complete():
     """6 桶齐全且每桶画像字段完整（与 P2/P3b 消费契约一致）。"""
     assert set(INDUSTRY_PROFILES.keys()) == set(INDUSTRY_BUCKETS)
-    required = {"wacc", "perpetual", "roe_benchmark", "is_financial", "eps_method",
+    required = {"wacc", "beta", "perpetual", "roe_benchmark", "is_financial", "eps_method",
                 "growth_clip", "capex_ratio", "payout_ratio"}
     for bucket, profile in INDUSTRY_PROFILES.items():
         assert required.issubset(profile.keys()), f"{bucket} 缺字段: {required - set(profile.keys())}"
@@ -90,6 +91,8 @@ def test_industry_profiles_complete():
         assert 0.0 < profile["capex_ratio"] < 1.0, f"{bucket} capex_ratio 越界"
         # payout_ratio 必须落在合理区间（0, 1]（item C2）
         assert 0.0 < profile["payout_ratio"] <= 1.0, f"{bucket} payout_ratio 越界"
+        # beta 必须落在合理区间（0.5, 2.0）（item P1：WACC 利率联动）
+        assert 0.5 < profile["beta"] < 2.0, f"{bucket} beta 越界"
 
 
 def test_payout_ratio_differentiated_by_bucket():
@@ -126,6 +129,15 @@ def test_other_bucket_matches_legacy_scenarios():
     other = INDUSTRY_PROFILES["其他"]
     assert other["wacc"] == SCENARIOS["中性 (Neutral)"]["wacc"] == 0.095
     assert other["perpetual"] == SCENARIOS["中性 (Neutral)"]["perpetual"] == 0.015
+
+
+def test_wacc_beta_calibration_invariant():
+    """item P1：β 校准使 Rf=锚点时动态 wacc == 兜底值（零回归口径）。
+    每桶 wacc ≈ RISK_FREE_REFERENCE + beta × EQUITY_RISK_PREMIUM（1e-4 容差）。"""
+    for bucket, profile in INDUSTRY_PROFILES.items():
+        expected = RISK_FREE_REFERENCE + profile["beta"] * EQUITY_RISK_PREMIUM
+        assert abs(profile["wacc"] - expected) < 1e-4, (
+            f"{bucket} wacc {profile['wacc']} != 校准值 {expected:.6f}")
 
 
 def test_financial_buckets_flagged():

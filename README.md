@@ -54,14 +54,16 @@ OldStockAnalysis/
 
 不同行业结构性地该用不同的 DCF 参数、ROE 基准与评分口径。系统先通过 `fetch_industry_info`（akshare `stock_individual_info_em`）取申万一级行业名 + 总股本，经 `SW_TO_BUCKET` 映射到 6 桶，再用 `INDUSTRY_PROFILES` 的画像驱动下游：
 
-| 桶 | WACC | 中性永续 | ROE 基准 | EPS 算法 | 金融桶 |
-|----|------|----------|----------|----------|--------|
-| 银行 | 9.5% | 1.5% | 11% | normalized | 是 |
-| 非银金融 | 9.5% | 1.5% | 12% | normalized | 是 |
-| 消费 | 9.0% | 2.0% | 15% | normalized | 否 |
-| 周期 | 10.0% | 1.0% | 12% | **shiller**（10 年净利平滑） | 否 |
-| 成长 | 8.5% | 2.5% | 15% | normalized | 否 |
-| 其他 | 9.5% | 1.5% | 15% | normalized | 否 |
+| 桶 | WACC | β | 中性永续 | ROE 基准 | EPS 算法 | 金融桶 |
+|----|------|---|----------|----------|----------|--------|
+| 银行 | 9.5% | 1.20 | 1.5% | 11% | normalized | 是 |
+| 非银金融 | 9.5% | 1.20 | 1.5% | 12% | normalized | 是 |
+| 消费 | 9.0% | 1.12 | 2.0% | 15% | normalized | 否 |
+| 周期 | 10.0% | 1.28 | 1.0% | 12% | **shiller**（10 年净利平滑） | 否 |
+| 成长 | 8.5% | 1.03 | 2.5% | 15% | normalized | 否 |
+| 其他 | 9.5% | 1.20 | 1.5% | 15% | normalized | 否 |
+
+WACC 列为 Rf=2.3%（`RISK_FREE_REFERENCE`）校准锚下的静态兜底值；实盘动态 WACC = Rf + β × ERP（见下文「折现率 WACC」）。
 
 - **DCF 参数**：`scenarios_for(bucket)` 按桶构造三情景；保守/破产清算恒为 0 增长 0 永续，中性永续取行业值，显性增长率由 `derive_explicit_growth`（对 `log(净利润)` 最小二乘拟合，clip 至 `[-5%, 12%]`）覆盖。
 - **总股本**：行业信息（EM f84）为优先来源，其次日频 `outstanding_share`、财务摘要；三源全失败返回 `None` 并跳过 DCF（不再用 197.56 亿硬兜底，避免对非 000001 标的错估每股价值）。
@@ -84,7 +86,7 @@ OldStockAnalysis/
 ### DCF 估值口径（行业化）
 
 - **自由现金流**：FCF = 经营现金流净额 − 资本性支出 × 0.7（仅 70% capex 视为维持性支出）。capex 缺失年按行业 `capex_ratio`（OCF 的该比例）兜底。基期 FCF 取近 5 年加权均值（近年权重大，含负值不剔除）。
-- **折现率 WACC**：随行业桶变化（成长 8.5% / 消费 9.0% / 其他·银行·非银 9.5% / 周期 10.0%），不再随情景变化。
+- **折现率 WACC（利率联动）**：`WACC = Rf + β × ERP`。`Rf` 取实时 10Y 国债收益率（`risk_free`，main/backtest 传 `bond_yield`，PIT 正确）；`ERP = EQUITY_RISK_PREMIUM` = 6%（A 股长期股权风险溢价中位数，独立于 step3 情绪 ERP——后者 = 1/PE−Rf≈3% 是「便宜-vs-债券」指标、非资本成本输入）；`β` 取各桶 `INDUSTRY_PROFILES[bucket]["beta"]`（见上表）。β 校准使 Rf = `RISK_FREE_REFERENCE`（2.3%，现行 10Y）时动态值 == 上表 WACC 静态兜底值（零回归），Rf 漂移时 WACC 随 β 线性漂移；`risk_free` 不可得时回退静态 WACC。三情景同 WACC，不再随情景变化。`dcf` 返回 dict 含 `wacc_basis`（mode/risk_free/beta/erp/wacc），终端打印分解式。
 - **三情景**：保守（0% 永续）/ 中性（行业永续 + CAGR 推导的显性增长率）/ 破产清算（0 增长且折旧摊销不计入）。保守/破产清算恒为 0 增长 0 永续。`wacc ≤ 永续增长`时跳过该情景（`intrinsic_value=None`），不产生负/无穷内在价值。
 - **破产清算**：现金流 = FCF − 折旧摊销（移除非现金加回项），为估值底值；D&A 不可得时按 FCF×0.5 估算清算口径（与全空时一致，自然满足 `破产清算 ≤ 保守`，事后钳位降为 inert 安全网）。
 - **合理估值上限**：`min(中性 DCF, 过去 5 年 PE 中位数 × 当前 EPS)`，作为估值天花板，避免 DCF 对成熟股过度外推。EPS 按行业 `eps_method` 取：normalized（近 5 年净利均）/ shiller（周期股近 10 年净利平滑峰谷）。低 PE 股（银行/周期）的 PE 锚定常低于 DCF 内在价值，此时天花板压低保守/破产清算以保完整阶梯。

@@ -42,12 +42,6 @@ END_DATE   = TODAY            # 日线结束日期（动态）
 FIN_START  = 2021             # 基本面起始年份
 FIN_END    = 2025             # 基本面结束年份
 
-# -- DCF 默认参数（成熟期「老登股」适配）------------------
-# WACC 固定 9.5%；显性 5 年增长率 = 永续增长率（成熟股无独立高增长期）。
-DCF_GROWTH    = 0.015          # 显性 5 年增长率（= 中性永续）
-DCF_PERPETUAL = 0.015          # 永续增长率（中性）
-DCF_WACC      = 0.095          # 加权平均资本成本（固定）
-
 # -- 三情景参数（成熟期口径）------------------------------
 # 删乐观；保守 0% 永续、中性 1.5% 永续、破产清算 0 增长且折旧摊销不计入。
 # "liquidation": True 标记该情景用 FCF − D&A 作现金流基（D&A 不可得回退归母净利润）。
@@ -91,7 +85,10 @@ SW_TO_BUCKET = {
 }
 
 # 行业画像：每桶差异化 DCF 参数 + 评分基准。
-#   wacc          —— 折现率（成长股低、周期股高）
+#   wacc          —— 折现率兜底值（成长股低、周期股高）。risk_free 不可得时直接用；
+#                    可得时由下方 beta/ERP 动态算（Rf + β × ERP）覆盖此值。
+#   beta          —— 行业 β（CAPM 股权成本敏感度）。校准使 Rf = RISK_FREE_REFERENCE 时
+#                    动态 wacc == wacc 兜底值（零回归）；Rf 漂移时 WACC 随 β 线性漂移。
 #   perpetual     —— 中性永续增长率（保守 / 破产清算恒为 0，由 scenarios_for 保证）
 #   roe_benchmark —— 评分中 ROE 满分基准（%）：银行 11、非银 12，其余 15
 #   is_financial  —— 金融桶：评分跳过资产负债率 / OCF 子分（结构不可比）
@@ -106,13 +103,24 @@ SW_TO_BUCKET = {
 #                    消费股高（0.40，现金流稳健分红慷慨）、周期股低（0.25，景气
 #                    波动需保留现金）、金融 0.30（银行监管约束下稳定派息）。
 DCF_GROWTH_CAGR_CLIP = (-0.05, 0.12)
+
+# 动态 WACC 口径（利率联动版）：WACC = risk_free + beta × EQUITY_RISK_PREMIUM。
+#   EQUITY_RISK_PREMIUM —— A 股长期股权风险溢价中位数（CAPM 用）。独立于
+#                          step3 情绪 ERP（=1/PE−Rf≈3%，是「便宜-vs-债券」情绪指标，
+#                          非资本成本输入；直接当 CAPM ERP 用会把 WACC 压到 ~5%）。
+#   RISK_FREE_REFERENCE —— β 校准锚点（demo/现行 10Y≈2.3%）。仅用于校准文档与测试
+#                          不变量，运行时不读（运行时 risk_free 走实时国债）。
+#   β 反解使 Rf=锚点时动态 wacc == 各桶 wacc 兜底值 → demo 逐字节零回归；
+#   Rf 上行时 WACC 随 β（1.0–1.3）线性上行，反映利率环境漂移。
+EQUITY_RISK_PREMIUM  = 0.06
+RISK_FREE_REFERENCE  = 0.023
 INDUSTRY_PROFILES = {
-    "银行":    {"wacc": 0.095, "perpetual": 0.015, "roe_benchmark": 11.0, "is_financial": True,  "eps_method": "normalized", "growth_clip": DCF_GROWTH_CAGR_CLIP, "capex_ratio": 0.10, "payout_ratio": 0.30},
-    "非银金融": {"wacc": 0.095, "perpetual": 0.015, "roe_benchmark": 12.0, "is_financial": True,  "eps_method": "normalized", "growth_clip": DCF_GROWTH_CAGR_CLIP, "capex_ratio": 0.10, "payout_ratio": 0.30},
-    "消费":    {"wacc": 0.090, "perpetual": 0.020, "roe_benchmark": 15.0, "is_financial": False, "eps_method": "normalized", "growth_clip": DCF_GROWTH_CAGR_CLIP, "capex_ratio": 0.15, "payout_ratio": 0.40},
-    "周期":    {"wacc": 0.100, "perpetual": 0.010, "roe_benchmark": 12.0, "is_financial": False, "eps_method": "shiller",    "growth_clip": DCF_GROWTH_CAGR_CLIP, "capex_ratio": 0.45, "payout_ratio": 0.25},
-    "成长":    {"wacc": 0.085, "perpetual": 0.025, "roe_benchmark": 15.0, "is_financial": False, "eps_method": "normalized", "growth_clip": DCF_GROWTH_CAGR_CLIP, "capex_ratio": 0.25, "payout_ratio": 0.15},
-    "其他":    {"wacc": 0.095, "perpetual": 0.015, "roe_benchmark": 15.0, "is_financial": False, "eps_method": "normalized", "growth_clip": DCF_GROWTH_CAGR_CLIP, "capex_ratio": 0.20, "payout_ratio": 0.30},
+    "银行":    {"wacc": 0.095, "beta": 1.2000, "perpetual": 0.015, "roe_benchmark": 11.0, "is_financial": True,  "eps_method": "normalized", "growth_clip": DCF_GROWTH_CAGR_CLIP, "capex_ratio": 0.10, "payout_ratio": 0.30},
+    "非银金融": {"wacc": 0.095, "beta": 1.2000, "perpetual": 0.015, "roe_benchmark": 12.0, "is_financial": True,  "eps_method": "normalized", "growth_clip": DCF_GROWTH_CAGR_CLIP, "capex_ratio": 0.10, "payout_ratio": 0.30},
+    "消费":    {"wacc": 0.090, "beta": 1.1167, "perpetual": 0.020, "roe_benchmark": 15.0, "is_financial": False, "eps_method": "normalized", "growth_clip": DCF_GROWTH_CAGR_CLIP, "capex_ratio": 0.15, "payout_ratio": 0.40},
+    "周期":    {"wacc": 0.100, "beta": 1.2833, "perpetual": 0.010, "roe_benchmark": 12.0, "is_financial": False, "eps_method": "shiller",    "growth_clip": DCF_GROWTH_CAGR_CLIP, "capex_ratio": 0.45, "payout_ratio": 0.25},
+    "成长":    {"wacc": 0.085, "beta": 1.0333, "perpetual": 0.025, "roe_benchmark": 15.0, "is_financial": False, "eps_method": "normalized", "growth_clip": DCF_GROWTH_CAGR_CLIP, "capex_ratio": 0.25, "payout_ratio": 0.15},
+    "其他":    {"wacc": 0.095, "beta": 1.2000, "perpetual": 0.015, "roe_benchmark": 15.0, "is_financial": False, "eps_method": "normalized", "growth_clip": DCF_GROWTH_CAGR_CLIP, "capex_ratio": 0.20, "payout_ratio": 0.30},
 }
 
 # 行业信息磁盘缓存 TTL（行业归属 + 总股本，月级稳定）

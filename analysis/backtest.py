@@ -118,7 +118,7 @@ def analyze_as_of(ctx_as_of, bundle: dict) -> dict:
         dcf = dcf_valuation(
             ctx_as_of.symbol, fin_abstract, cashflow_df, daily_df,
             fin_start, fin_end, stock_indicator=stock_indicator,
-            industry_info=industry_info)
+            industry_info=industry_info, risk_free=bond_yield)
         sentiment = market_sentiment(
             market_df, bond_yield, stock_indicator, market_pe_history, bond_yield_history)
         advice = investment_advice(daily_df, dcf, sentiment, screening)

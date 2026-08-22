@@ -13,7 +13,7 @@ import pandas as pd
 import analysis.step2_dcf as dcf_mod
 from analysis import dcf_valuation
 from analysis.step2_dcf import derive_explicit_growth
-from config import INDUSTRY_PROFILES
+from config import INDUSTRY_PROFILES, EQUITY_RISK_PREMIUM
 
 SCN_ORDER = ["保守 (Conservative)", "中性 (Neutral)", "破产清算 (Liquidation)"]
 
@@ -150,7 +150,8 @@ def test_ladder_never_exceeds_ceiling(ctx, fin_abstract, cashflow_df, daily_df, 
 
 def test_wacc_matches_industry_profile(ctx, fin_abstract, cashflow_df, daily_df,
                                        stock_indicator, bucket):
-    """三情景 WACC == 行业画像 wacc（item 1：DCF 参数行业化）。"""
+    """不传 risk_free → 回退静态 wacc：三情景 WACC == 行业画像 wacc（item 1）。
+    动态路径（利率联动）见 test_wacc_dynamic_rate_linked。"""
     dcf = dcf_valuation(ctx.symbol, fin_abstract, cashflow_df, daily_df,
                         stock_indicator=stock_indicator,
                         industry_info={"bucket": bucket})
@@ -158,6 +159,7 @@ def test_wacc_matches_industry_profile(ctx, fin_abstract, cashflow_df, daily_df,
     for name, p in dcf["scenario_params"].items():
         assert abs(p["wacc"] - expected_wacc) < 1e-9
     assert dcf["bucket"] == bucket
+    assert dcf["wacc_basis"]["mode"] == "fallback"
 
 
 def test_neutral_growth_from_cagr(ctx, fin_abstract, cashflow_df, daily_df,
@@ -177,6 +179,36 @@ def test_neutral_growth_from_cagr(ctx, fin_abstract, cashflow_df, daily_df,
     assert dcf["explicit_growth"] is not None
     assert abs(sp["中性 (Neutral)"]["growth"] - dcf["explicit_growth"]) < 1e-9
     assert abs(sp["中性 (Neutral)"]["perpetual"] - expected_perp) < 1e-9
+
+
+def test_wacc_dynamic_rate_linked(ctx, fin_abstract, cashflow_df, daily_df,
+                                  stock_indicator):
+    """item P1：传 risk_free → WACC 利率联动 = Rf + β×ERP（随 Rf 漂移）。
+    成长桶 β=1.0333、ERP=6%：Rf=2.3%（校准锚）→ wacc==静态 0.085（零回归）；
+    Rf=3.5% → wacc=0.035+1.0333×0.06≈0.097 ≠ 0.085（证明利率联动）。"""
+    bucket = "成长"
+    beta = INDUSTRY_PROFILES[bucket]["beta"]
+    static_wacc = INDUSTRY_PROFILES[bucket]["wacc"]
+
+    # 校准锚点：Rf=2.3% → 动态 == 静态（零回归）
+    dcf = dcf_valuation(ctx.symbol, fin_abstract, cashflow_df, daily_df,
+                        stock_indicator=stock_indicator,
+                        industry_info={"bucket": bucket}, risk_free=0.023)
+    assert dcf["wacc_basis"]["mode"] == "dynamic"
+    assert dcf["wacc_basis"]["beta"] == beta
+    assert dcf["wacc_basis"]["erp"] == EQUITY_RISK_PREMIUM
+    assert abs(dcf["wacc_basis"]["risk_free"] - 0.023) < 1e-9
+    for name, p in dcf["scenario_params"].items():
+        assert abs(p["wacc"] - static_wacc) < 1e-4
+
+    # 利率上行：Rf=3.5% → wacc 随 β 上行，≠ 静态
+    dcf_up = dcf_valuation(ctx.symbol, fin_abstract, cashflow_df, daily_df,
+                           stock_indicator=stock_indicator,
+                           industry_info={"bucket": bucket}, risk_free=0.035)
+    expected_up = 0.035 + beta * EQUITY_RISK_PREMIUM
+    for name, p in dcf_up["scenario_params"].items():
+        assert abs(p["wacc"] - expected_up) < 1e-9
+    assert expected_up > static_wacc      # 利率上行 → WACC 上行
 
 
 def test_total_shares_none_guard(ctx, fin_abstract, cashflow_df, daily_df, stock_indicator):
@@ -324,7 +356,7 @@ def test_wacc_le_perp_guard_skips_scenario(ctx, fin_abstract, cashflow_df, daily
                                            stock_indicator, monkeypatch):
     """item A4：wacc≤永续的情景被 guard 跳过，不产生负/无穷内在价值、不抛异常。
     post-loop 安全兜底把 None 转为非负有限值，供下游 investment_advice（无 None 处理）使用。"""
-    def divergent_scenarios(_bucket):
+    def divergent_scenarios(_bucket, risk_free=None):
         return {
             "保守 (Conservative)":  {"growth": 0.000, "perpetual": 0.000, "wacc": 0.095},
             "中性 (Neutral)":        {"growth": 0.30, "perpetual": 0.30, "wacc": 0.095},  # perp>wacc

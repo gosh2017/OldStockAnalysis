@@ -142,7 +142,7 @@ def main(ctx: StockContext, *, quiet: bool = False) -> dict:
     # -- 3. Step 2：DCF 估值（行业画像决定参数 / EPS 算法 / 总股本来源）--
     dcf_result = dcf_valuation(ctx.symbol, fin_abstract, cashflow_df, daily_df,
                                 ctx.fin_start, ctx.fin_end, stock_indicator=stock_indicator,
-                                industry_info=industry_info)
+                                industry_info=industry_info, risk_free=bond_yield)
 
     # -- 3b. DCF 敏感性分析 --
     sensitivity = dcf_sensitivity(dcf_result.get("base_fcf"), dcf_result.get("total_shares"))

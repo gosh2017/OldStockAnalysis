@@ -51,6 +51,10 @@
 ### 新增（仪表盘）
 - **输入清单跨启动持久化**：Streamlit 仪表盘「批量排名 / 历史回测」两个标的输入框的文本现缓存到 `.cache/dashboard_inputs.json`，下次启动 streamlit 自动恢复上次输入，免去重复录入。侧边栏「➕ 批量排名 / ➕ 历史回测」与「❌ 移除」现直接改写对应输入框文本（此前侧边栏追加与输入框脱节：首次渲染后追加不回填输入框），输入框成为唯一数据源；编辑（on_change）、追加、移除三处均即时落盘，失败静默降级不阻断主流程。新增 `tests/test_dashboard_inputs_cache.py`（6 例，AppTest 模拟跨会话恢复 / 追加 / 移除 / 注释行保留 / 无缓存回退默认清单）。
 
+### 变更（DCF 折现率）
+- **WACC 改为利率联动（Rf + β × ERP）**：DCF 折现率由「每桶静态常数」改为动态算式 `WACC = risk_free + β × ERP`。`risk_free` 取实时 10Y 国债收益率（main/backtest 已传 `bond_yield`，PIT 正确），`ERP = EQUITY_RISK_PREMIUM` = 0.06（A 股长期股权风险溢价中位数，独立于 step3 情绪 ERP——后者 = 1/PE−Rf≈3% 是「便宜-vs-债券」指标、非资本成本输入），`β` 取各桶 `INDUSTRY_PROFILES[bucket]["beta"]`（成长 1.0333 / 消费 1.1167 / 其他·银行·非银 1.2000 / 周期 1.2833）。β 反解校准使 Rf = `RISK_FREE_REFERENCE` = 0.023（现行 10Y）时动态值 == 旧静态 wacc（零回归），Rf 漂移时 WACC 随 β 线性漂移；`risk_free` 不可得回退静态 wacc 兜底值。`scenarios_for(bucket, risk_free=None)` / `dcf_valuation(..., risk_free=None)` 新增可选参；返回 dict 新增 `wacc_basis`（mode/risk_free/beta/erp/wacc）+ 终端打印分解式 `[INFO] WACC 利率联动: Rf X% + β Y × ERP Z% = W%`。新增 `tests/test_dcf.py::test_wacc_dynamic_rate_linked` + `tests/test_industry.py::test_wacc_beta_calibration_invariant`；`pytest -q` 130 项全绿，`--demo` 逐字节零回归（仅多一行 INFO）。
+- README 同步：行业分桶表新增 `β` 列、DCF 口径「折现率 WACC」改写为利率联动（公式 + β/ERP/Rf 来源 + 零回归校准说明）。
+
 ## [ae7baf6] - 2026-08-18
 
 ### 新增

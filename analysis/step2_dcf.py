@@ -21,20 +21,29 @@ import pandas as pd
 
 from config import (
     FIN_START, FIN_END, SCENARIOS, DCF_SENSITIVITY,
-    INDUSTRY_PROFILES, DCF_GROWTH_CAGR_CLIP,
+    INDUSTRY_PROFILES, DCF_GROWTH_CAGR_CLIP, EQUITY_RISK_PREMIUM,
 )
 from utils import sep, find_col_in, pick_annual_row
 
 
-def scenarios_for(bucket: str) -> dict:
+def scenarios_for(bucket: str, risk_free: float | None = None) -> dict:
     """由行业画像构造与 SCENARIOS 同形的三情景参数。
 
     保守 / 破产清算 恒为 0 增长 0 永续；中性 growth 取行业永续作为基线，
     实际显性增长率由 dcf_valuation 内 derive_explicit_growth 覆盖。
     "其他"桶 == 现行 SCENARIOS（等价回退路径，保证零回归）。
+
+    WACC 利率联动：risk_free 可得时 wacc = risk_free + β×ERP（β 取行业画像
+    beta、ERP = EQUITY_RISK_PREMIUM），随实时国债漂移；risk_free 不可得（None）
+    时回退画像 wacc 兜底值。β 校准使 Rf = RISK_FREE_REFERENCE 时动态值 ==
+    兜底值（零回归），Rf 漂移时 WACC 随 β 线性漂移。
     """
     p = INDUSTRY_PROFILES.get(bucket) or INDUSTRY_PROFILES["其他"]
-    wacc, perp = p["wacc"], p["perpetual"]
+    if risk_free is not None:
+        wacc = risk_free + p["beta"] * EQUITY_RISK_PREMIUM
+    else:
+        wacc = p["wacc"]
+    perp = p["perpetual"]
     return {
         "保守 (Conservative)":  {"growth": 0.000, "perpetual": 0.000, "wacc": wacc},
         "中性 (Neutral)":        {"growth": perp, "perpetual": perp, "wacc": wacc},
@@ -78,6 +87,7 @@ def dcf_valuation(
     fin_end: int | None = None,
     stock_indicator: pd.DataFrame | None = None,
     industry_info: dict | None = None,
+    risk_free: float | None = None,
 ) -> dict:
     """执行 DCF 三情景估值，返回包含估值结果的字典。
 
@@ -85,6 +95,8 @@ def dcf_valuation(
     stock_indicator（个股历史 PE/PB）用于「过去 5 年 PE 中位数 × 当前 EPS」锚定上限。
     industry_info（行业归属 + 总股本，来自 fetch_industry_info）：决定 DCF 参数 /
     EPS 算法 / 总股本来源；None → "其他"桶（== 现行口径，零回归）。
+    risk_free（10Y 国债收益率）：可得时启用 WACC 利率联动（Rf + β×ERP），
+    None → 回退画像 wacc 兜底值（零回归）。
 
     返回 dict 字段（本任务 A1/A4/A5 新增/调整）：
       capex_estimated : bool，是否有年份 capex 走了行业比例兜底（item A1），
@@ -222,10 +234,18 @@ def dcf_valuation(
     # -- 显性增长率（CAGR 推导，item 1）--
     explicit_growth = derive_explicit_growth(net_profit_values, profile["growth_clip"])
 
-    # -- 三情景参数（行业化 + 中性显性增长覆盖）--
-    scenario_params = scenarios_for(bucket)
+    # -- 三情景参数（行业化 + 中性显性增长覆盖 + WACC 利率联动）--
+    scenario_params = scenarios_for(bucket, risk_free=risk_free)
     if explicit_growth is not None:
         scenario_params["中性 (Neutral)"]["growth"] = explicit_growth
+    # 透明度：记录 WACC 算法依据（dynamic / fallback + 分解项）
+    wacc_basis = {
+        "mode": "dynamic" if risk_free is not None else "fallback",
+        "risk_free": risk_free,
+        "beta": profile.get("beta"),
+        "erp": EQUITY_RISK_PREMIUM,
+        "wacc": scenario_params["中性 (Neutral)"]["wacc"],
+    }
 
     # -- 基期 FCF（加权均值，含负值不剔，item 3）--
     all_fcf = [v for v in fcf_values.values() if v is not None]
@@ -238,6 +258,7 @@ def dcf_valuation(
                 "pe_median_5y": None, "current_eps": None, "pe_anchor_value": None,
                 "da_available": da_available, "capex_estimated": bool(capex_estimated_years),
                 "bucket": bucket,
+                "wacc_basis": wacc_basis,
                 "scenario_params": scenario_params, "explicit_growth": explicit_growth,
                 "has_negative_fcf": has_negative_fcf, "eps_method": eps_method,
                 "non_annual_years": sorted(non_annual_years)}
@@ -279,6 +300,7 @@ def dcf_valuation(
                 "pe_median_5y": None, "current_eps": None, "pe_anchor_value": None,
                 "da_available": da_available, "capex_estimated": bool(capex_estimated_years),
                 "bucket": bucket,
+                "wacc_basis": wacc_basis,
                 "scenario_params": scenario_params, "explicit_growth": explicit_growth,
                 "has_negative_fcf": has_negative_fcf, "eps_method": eps_method,
                 "non_annual_years": sorted(non_annual_years)}
@@ -329,6 +351,14 @@ def dcf_valuation(
 
         print(f"  {scenario_name:>20s}  {g:>7.1%}  {perp_g:>7.1%}  {wacc:>7.1%}"
               f"  {intrinsic_value:>9.2f} 元")
+
+    # WACC 利率联动分解式（透明度）
+    if wacc_basis["mode"] == "dynamic":
+        print(f"  [INFO] WACC 利率联动: Rf {wacc_basis['risk_free']:.2%} + "
+              f"β {wacc_basis['beta']:.4g} × ERP {wacc_basis['erp']:.2%} "
+              f"= {wacc_basis['wacc']:.2%}")
+    else:
+        print(f"  [INFO] WACC 静态兜底: {wacc_basis['wacc']:.2%}（risk_free 不可得）")
 
     if explicit_growth is not None:
         print(f"  [INFO] 中性显性增长率由净利 CAGR 推导: {explicit_growth:.2%}"
@@ -428,6 +458,7 @@ def dcf_valuation(
         "has_negative_fcf": has_negative_fcf,
         "eps_method": eps_method,
         "non_annual_years": sorted(non_annual_years),   # item C3：仅季报年份（接口预留，未接 scoring）
+        "wacc_basis": wacc_basis,
     }
 
 
