@@ -202,6 +202,23 @@ SENTIMENT_HISTORY_DAYS = 365 * 10   # 近 10 年（item 12：扩窗以稳定分�
 INDIVIDUAL_PERCENTILE_WINDOW_YEARS = 5
 
 
+# -- 历史回测验证模块（提示词 D）----------------------------
+# 回测是现有分析层的"消费者"：以数据注入方式复用 step1–4 / scoring，
+# 不改其算法与权重。以下参数集中配置回测口径，便于一处校准全局生效。
+# 限定：AkShare 财务/现金流接口返回全历史且常含重述后数据，回测按"截止 as-of
+# 日 T"显式截断所有输入序列，仅为"准 PIT"口径（非严格历史可得，详见 README 限定）。
+BACKTEST_REBALANCE_FREQ = "Q"   # 调仓频率：M(月)/Q(季)/Y(年)
+BACKTEST_HOLD_PERIOD    = None  # 持有期交易日数；None=持有至下一调仓日
+BACKTEST_TOP_N          = 10    # 每期最多选入标的数（按 score 降序）
+BACKTEST_MIN_GRADE      = "B"   # 选股最低等级（grade >= 该等级才入选）
+BACKTEST_WEIGHT         = "equal"  # 组合权重：equal(等权) / score(按 score 归一加权)
+BACKTEST_TXN_COST       = 0.001  # 单边交易成本（0.1%）；换仓双边各扣一次 → round-trip 2×
+BACKTEST_BENCHMARK      = "000300"  # 基准指数（沪深 300）
+BACKTEST_LOOKBACK_YEARS = 10     # 默认回测回溯年数（未给 --years 时 end=今天、start=今天−N 年）
+BACKTEST_PUB_LAG_DAYS   = 120    # 财报披露滞后保守口径（年报次年 4–5 月披露，≈4 个月）
+BACKTEST_RISK_FREE      = None   # 无风险利率；None=取国债历史末值年化
+
+
 # -- 贯穿调用链的上下文（去全局化的地基）------------------
 @dataclass(frozen=True)
 class StockContext:

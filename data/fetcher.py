@@ -134,6 +134,56 @@ def _total_shares_from_daily(daily_df: pd.DataFrame) -> float | None:
     return None
 
 
+def fetch_benchmark_daily(symbol: str = "000300",
+                          start_date: str | None = None,
+                          end_date: str | None = None) -> pd.DataFrame:
+    """
+    获取基准指数日频数据（默认沪深 300），用于回测基准曲线。
+
+    返回与 fetch_daily_data 同构的 [日期, 收盘] 表（仅保留两列，指数无 OHLCV
+    需求）。多接口 fallback：stock_zh_index_daily（新浪，symbol 需带前缀 sh/sz）
+    优先，index_zh_a_hist（东财，period=daily）次之。失败返回空 DataFrame。
+
+    注意：本环境无网，实盘路径需联网复验（已在 CHANGELOG / 已知限定标注）。
+    离线回测走 data.demo_data.generate_benchmark_daily（确定性模拟基准）。
+    """
+    start = start_date or START_DATE
+    end = end_date or END_DATE
+    print(f"\n[INFO] 正在获取基准指数 {symbol} 日线（{start} ~ {end}）...")
+
+    # stock_zh_index_daily 需带交易所前缀：6 开头 → sh，0/3 开头 → sz
+    prefixed = _prefix_symbol(symbol) if not str(symbol).startswith(("sh", "sz")) else symbol
+
+    strategies = [
+        ("stock_zh_index_daily", {"symbol": prefixed}),
+        ("index_zh_a_hist", {"symbol": symbol, "period": "daily",
+                             "start_date": start, "end_date": end}),
+    ]
+
+    df = None
+    for func_name, kwargs in strategies:
+        fn = getattr(ak, func_name, None)
+        if fn is None:
+            print(f"  [!] {func_name} 不可用，跳过")
+            continue
+        df = try_fetch(fn, **kwargs)
+        if df is not None and not df.empty:
+            print(f"  [OK] 使用 {func_name} 成功获取基准数据")
+            break
+
+    if df is None or df.empty:
+        print("  [X] 未能获取基准指数日线，回测基准曲线将缺失。")
+        return pd.DataFrame()
+
+    df = _normalize_daily_df(df)
+    # 仅保留日期/收盘（指数无需 OHLCV，且部分接口列名不一）
+    keep = [c for c in ["日期", "收盘"] if c in df.columns]
+    df = df[keep].sort_values("日期").reset_index(drop=True) if keep else df
+    if not df.empty:
+        print(f"  [OK] 基准日线 {len(df)} 期，最新: {df['收盘'].iloc[-1]:.2f}")
+    return df
+
+
 def _extract_financial_indicator(df, indicator_patterns: list) -> pd.Series | None:
     """
     在财务摘要 DataFrame 中查找匹配指定模式的指标行，返回该行的 Series。

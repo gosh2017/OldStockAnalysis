@@ -13,6 +13,7 @@ from .fetcher import (
     fetch_market_pe_history,
     fetch_stock_indicator,
     fetch_industry_info,
+    fetch_benchmark_daily,
     map_to_industry_bucket,
     fetch_stock_list,
     search_stocks,
@@ -24,6 +25,12 @@ from .demo_data import (
     generate_market_pe_history,
     generate_bond_yield_history,
     generate_industry_info,
+    generate_benchmark_daily,
+)
+from .pit import (
+    truncate_to_date,
+    filter_reports_by_pub_lag,
+    as_of_bundle,
 )
 
 __all__ = [
@@ -37,6 +44,7 @@ __all__ = [
     "fetch_market_pe_history",
     "fetch_stock_indicator",
     "fetch_industry_info",
+    "fetch_benchmark_daily",
     "map_to_industry_bucket",
     "fetch_stock_list",
     "search_stocks",
@@ -46,4 +54,8 @@ __all__ = [
     "generate_market_pe_history",
     "generate_bond_yield_history",
     "generate_industry_info",
+    "generate_benchmark_daily",
+    "truncate_to_date",
+    "filter_reports_by_pub_lag",
+    "as_of_bundle",
 ]

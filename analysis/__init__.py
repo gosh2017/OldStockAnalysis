@@ -7,6 +7,7 @@ from .step2_dcf import dcf_valuation, dcf_sensitivity
 from .step3_sentiment import market_sentiment
 from .step4_advice import investment_advice
 from .scoring import compute_score, score_summary
+from .backtest import analyze_as_of, run_backtest, compute_metrics, BacktestResult
 
 __all__ = [
     "fundamental_screening",
@@ -16,4 +17,8 @@ __all__ = [
     "investment_advice",
     "compute_score",
     "score_summary",
+    "analyze_as_of",
+    "run_backtest",
+    "compute_metrics",
+    "BacktestResult",
 ]

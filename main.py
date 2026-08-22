@@ -28,7 +28,12 @@ import pandas as pd
 # 注意：UTF-8 stdout 重包装已移至 _cli() 内，避免被 Streamlit/测试
 # 等导入本模块时干扰其 stdout 处理。
 
-from config import STOCK_CODE, STOCK_NAME, StockContext
+from config import (
+    STOCK_CODE, STOCK_NAME, StockContext, END_DATE,
+    BACKTEST_REBALANCE_FREQ, BACKTEST_HOLD_PERIOD, BACKTEST_TOP_N,
+    BACKTEST_MIN_GRADE, BACKTEST_WEIGHT, BACKTEST_TXN_COST,
+    BACKTEST_BENCHMARK, BACKTEST_LOOKBACK_YEARS, BACKTEST_RISK_FREE,
+)
 from utils import sep
 from data import (
     fetch_daily_data,
@@ -52,8 +57,17 @@ from analysis import (
     market_sentiment,
     investment_advice,
     compute_score,
+    run_backtest,
+    BacktestResult,
 )
-from visualization import plot_valuation_chart, plot_sensitivity_heatmap, render_html_report
+from visualization import (
+    plot_valuation_chart,
+    plot_sensitivity_heatmap,
+    render_html_report,
+    plot_equity_curve,
+    plot_drawdown,
+    plot_grade_forward_returns,
+)
 
 
 def main(ctx: StockContext, *, quiet: bool = False) -> dict:
@@ -307,6 +321,123 @@ def run_batch(items: list, demo: bool = False) -> pd.DataFrame:
     return df
 
 
+def run_backtest_flow(items, *, demo: bool, years, no_chart: bool, out_dir: str | None) -> None:
+    """历史回测入口：run_backtest → 图表 → 打印业绩表 + 等级前向收益表 + 结论。
+
+    --years 复用为回测区间（YYYY；转 YYYYMMDD 起止）；缺省 end=今天、start=今天−
+    BACKTEST_LOOKBACK_YEARS 年。回测参数取 config.BACKTEST_* 集中配置。
+    """
+    if years:
+        start, end = f"{years[0]}0101", f"{years[1]}1231"
+    else:
+        end = END_DATE
+        end_year = int(END_DATE[:4])
+        start = f"{end_year - BACKTEST_LOOKBACK_YEARS}0101"
+
+    kwargs = dict(symbol="backtest", name="历史回测", demo=demo, no_chart=no_chart)
+    if out_dir:
+        kwargs["out_dir"] = out_dir
+        kwargs["chart_dir"] = f"{out_dir}/charts"
+        kwargs["report_dir"] = f"{out_dir}/reports"
+    ctx = StockContext(**kwargs)
+
+    mode = "demo" if demo else "live"
+    print(f"\n{'=' * 70}\n  历史回测验证（{len(items)} 只标的 · {start} ~ {end} · {mode} 模式）\n{'=' * 70}")
+    if demo:
+        print("[INFO] --backtest-demo：使用 seeded 模拟数据，全程无网（非真实行情）")
+
+    result = run_backtest(
+        items, start=start, end=end,
+        freq=BACKTEST_REBALANCE_FREQ, hold_days=BACKTEST_HOLD_PERIOD,
+        top_n=BACKTEST_TOP_N, min_grade=BACKTEST_MIN_GRADE,
+        weight=BACKTEST_WEIGHT, txn_cost=BACKTEST_TXN_COST,
+        benchmark=BACKTEST_BENCHMARK, demo=demo,
+    )
+
+    if not no_chart:
+        plot_equity_curve(result, ctx)
+        plot_drawdown(result, ctx)
+        plot_grade_forward_returns(result, ctx)
+
+    _print_backtest_summary(result, items, demo)
+
+
+def _print_backtest_summary(result: BacktestResult, items, demo: bool) -> None:
+    """打印回测业绩表 + 各等级前向收益表 + 信号有效性结论。"""
+    m = result.metrics or {}
+
+    def _pct(v):
+        return f"{v * 100:.2f}%" if v is not None else "N/A"
+
+    sep("回测业绩度量")
+    rows = [
+        ("总收益",       _pct(m.get("total_return"))),
+        ("年化收益 CAGR", _pct(m.get("cagr"))),
+        ("年化波动率",    _pct(m.get("volatility"))),
+        ("最大回撤",      _pct(m.get("max_drawdown"))),
+        ("Sharpe 比率",   f"{m.get('sharpe'):.2f}" if m.get("sharpe") is not None else "N/A"),
+        ("胜率",          _pct(m.get("win_rate"))),
+        ("Alpha（vs 基准）", _pct(m.get("alpha"))),
+        ("Beta（vs 基准）",  f"{m.get('beta'):.2f}" if m.get("beta") is not None else "N/A"),
+        ("无风险利率",     _pct(m.get("risk_free"))),
+        ("调仓期数",       str(len(result.rebalance_dates))),
+    ]
+    label_w = max(_disp_width(lbl) for lbl, _ in rows)
+    value_w = max(_disp_width(val) for _, val in rows)
+    inner = label_w + value_w + 6
+    border = "+" + "-" * (inner + 2) + "+"
+    print(border)
+    for lbl, val in rows:
+        print(f"|  {_pad(lbl, label_w)}  |  {_pad(val, value_w)}  |")
+    print(border)
+
+    # 各等级前向收益表
+    sep("各等级前向收益（信号单调性验证）")
+    gfr = result.grade_forward_returns or {}
+    grades = ["A", "B", "C", "D"]
+    g_rows = []
+    means = {}
+    for g in grades:
+        seq = gfr.get(g, [])
+        n = len(seq)
+        mean = (sum(seq) / len(seq)) if seq else None
+        means[g] = mean
+        g_rows.append({
+            "等级": g,
+            "样本数": n,
+            "平均前向收益": f"{mean * 100:+.2f}%" if mean is not None else "—",
+        })
+    print(pd.DataFrame(g_rows).to_string(index=False))
+
+    # 结论：对比最高等级（有数据）vs 最低等级
+    best_g = next((g for g in grades if means.get(g) is not None), None)
+    worst_g = next((g for g in reversed(grades) if means.get(g) is not None), None)
+    print()
+    if best_g and worst_g and best_g != worst_g:
+        bm, wm = means[best_g], means[worst_g]
+        valid = bm > wm
+        verdict = "有效" if valid else "无效"
+        print(f"  ★ {best_g} 级平均前向收益 {bm * 100:+.2f}% vs {worst_g} 级 {wm * 100:+.2f}%"
+              f" → 信号{verdict}（高等级{'跑赢' if valid else '未跑赢'}低等级）")
+    elif best_g:
+        print(f"  ★ 仅有 {best_g} 级样本（平均前向收益 {means[best_g] * 100:+.2f}%），"
+              f"无法做等级间对比，信号有效性待更多样本。")
+    else:
+        print("  ★ 无足够等级样本，信号有效性无法判定。")
+
+    # 诚实限定
+    print("\n  [限定] 本回测为「准 PIT」口径（AkShare 财务可能重述）+ 幸存者偏差"
+          "（仅含当前在市标的）+ 简化成本（未计滑点/税/停牌流动性），"
+          "非严格历史回测，结论仅供研究参考。")
+    if demo:
+        print("  [限定] --backtest-demo 使用模拟数据，前向收益为随机序列，"
+              "仅验证回测机制（引擎/度量/图表）可运行，不构成真实信号证据。")
+    print()
+
+
+
+
+
 def resolve_symbol(query: str, demo: bool) -> tuple:
     """
     把用户输入解析为 (code, name)。支持：
@@ -382,7 +513,29 @@ def _cli():
         "--batch-demo", action="store_true",
         help="批量选股 demo：用内置标的清单 + 模拟数据打分排名（无需网络）",
     )
+    parser.add_argument(
+        "--backtest", default=None,
+        help="历史回测：传入含 '代码,名称' 的文本文件，验证信号历史有效性（实盘联网）",
+    )
+    parser.add_argument(
+        "--backtest-demo", action="store_true",
+        help="历史回测 demo：内置标的清单 + seeded 模拟数据，全程无网验证回测机制",
+    )
     args = parser.parse_args()
+
+    # -- 回测模式分发 --
+    if args.backtest_demo:
+        run_backtest_flow(BATCH_DEMO_LIST, demo=True, years=args.years,
+                          no_chart=args.no_chart, out_dir=args.out_dir)
+        return
+    if args.backtest:
+        items = _read_batch_file(args.backtest)
+        if not items:
+            print(f"[X] 未从 {args.backtest} 读到任何标的（每行格式：代码,名称）")
+            return
+        run_backtest_flow(items, demo=args.demo, years=args.years,
+                          no_chart=args.no_chart, out_dir=args.out_dir)
+        return
 
     # -- 批量模式分发 --
     if args.batch_demo:

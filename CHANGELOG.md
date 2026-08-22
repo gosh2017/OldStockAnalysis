@@ -5,7 +5,24 @@
 
 ## [未发布]
 
-> 本次合并三组"估值 / 评分 / 情绪口径"合理性优化，对应 `prompts/01_dcf_valuation.md`（A）、`prompts/02_scoring.md`（B）、`prompts/03_sentiment_fundamental.md`（C）。条目以 `(A1)`/`(B2)` 等标注回溯至提示词。
+> 新增**历史回测验证模块**（提示词 D，对应 `prompts/04_backtest.md`），验证综合评分信号在历史上是否有效（"A/B 级是否跑赢 D 级与基准"）。回测是现有分析层的"消费者"，以数据注入方式复用 step1–4 / scoring，**不改其算法与权重**。条目以 `(D1)`–`(D6)` 标注回溯至提示词。
+
+### 新增（回测模块）
+- **(D1) 时点数据截断层 `data/pit.py`**：`truncate_to_date`（按日期列模糊匹配截断到 ≤ as_of）、`filter_reports_by_pub_lag`（财报按"报告期 + 披露滞后 120d"过滤，避免把未披露年报当已知 → 未来函数）、`as_of_bundle`（组合产出回测一次调用的全部截断数据）。保证每个调仓日 T 看到的数据不晚于 T。
+- **(D2) 时点分析适配器 `analysis/backtest.py::analyze_as_of`**：接收截断 bundle + end_date=as_of 的 StockContext，按 main() 同序调用 step1–4 + compute_score，`redirect_stdout` 静默；fin 窗口从 bundle 派生（fin_end=最近可用年报年、fin_start=fin_end−4，与 main 的 5 年窗口一致）。不改 step/scoring 内部；与 main() 等级/建议一致性回归用例守护。
+- **(D3) 回测引擎 `run_backtest`**：调仓日序列（M/Q/Y，纯 pandas 无 dateutil 依赖）→ 每标的 analyze_as_of → 选股（grade≥min_grade 且 score 降序 top_n）→ 等权/得分归一权重 → 日频 mark-to-market 净值（换仓扣双边成本、空仓期记 0、退市/停牌缺失记 0 并标 `delisted`）。`BacktestResult` 含 equity_curve/positions/trades/benchmark_curve/grade_forward_returns/metrics/rebalance_dates。`grade_forward_returns` 把**全部**标的按等级分桶记 hold 期前向收益，验证 A/B/C/D 单调性证据。
+- **(D4) 业绩度量 `compute_metrics`**：纯 numpy 实现总收益/CAGR/年化波动/最大回撤/Sharpe/胜率/Alpha/Beta；空/常数序列回退 None 不抛（vol=0→Sharpe=None、var(bench)=0→Beta=None），scipy 不可用无硬依赖。
+- **(D5) 基准与可视化**：`fetch_benchmark_daily`（沪深 300，`stock_zh_index_daily`/`index_zh_a_hist` fallback）+ `generate_benchmark_daily`（确定性模拟基准）；`visualization/backtest_charts.py` 三图——净值曲线（策略 vs 基准）/ 水下回撤图 / 各等级平均前向收益柱状（验单调性）。matplotlib 优先 + plotly 软导入，`--no-chart` 同口径，输出 `charts/backtest_*.{png,html}`。
+- **(D6) 配置 / demo 时序化 / CLI 接线**：`config.py` 新增 `BACKTEST_*` 参数集中配置（频率/持有期/top_n/最低等级/权重/交易成本/基准/回溯年/披露滞后/无风险利率）；`generate_all_demo_data(backtest=True)` 生成跨 ~2011–今宽跨度多报告期序列（按标的派生 quality 因子缩放 ROE/净利/OCF/PE-PB 制造 A/B/C/D 截面分散），默认分支逐字节不变（quality=1.0 → 零回归）；`main.py` 新增 `--backtest FILE`（实盘）与 `--backtest-demo`（内置标的 + 模拟数据，全程无网），打印业绩度量表 + 等级前向收益表 + 信号有效性结论（"A 级平均前向收益 X% vs D 级 Y%，信号{有效/无效}"）。`--years`/`--out-dir`/`--no-chart` 复用。
+- **测试**：新增 `tests/test_pit.py`（11 例）+ `tests/test_backtest.py`（12 例），覆盖截断/披露滞后/analyze_as_of fin 窗口前移与一致性/run_backtest 结构与成本/compute_metrics 数学（总收益/最大回撤/常数 Sharpe=None/同曲线 Beta≈1）。`pytest -q` 122 项全绿，`--demo`/`--batch-demo`/`--backtest-demo` 跑通零回归。
+
+### 文档（回测模块）
+- README 同步回测模块：新增「历史回测验证」小节、CLI 参数表补 `--backtest` / `--backtest-demo`、项目结构补 `data/pit.py` / `analysis/backtest.py` / `visualization/backtest_charts.py`、功能概述表补回测行。
+- README / CHANGELOG 新增**三段限定**：准 PIT（AkShare 财务可能重述）+ 幸存者偏差（仅含当前在市标的）+ 简化成本（未计滑点/税/停牌流动性），不得宣称严格历史回测；`fetch_benchmark_daily` 实盘路径本环境无网，需联网复验。
+
+---
+
+> 以下为**估值 / 评分 / 情绪口径**三组合理性优化，对应 `prompts/01_dcf_valuation.md`（A）、`prompts/02_scoring.md`（B）、`prompts/03_sentiment_fundamental.md`（C）。条目以 `(A1)`/`(B2)` 等标注回溯至提示词。
 
 ### 新增
 - **(A1) 行业化 capex 兜底**：`INDUSTRY_PROFILES` 各桶新增 `capex_ratio`（周期 0.45 / 其他 0.20 / 消费 0.15 / 成长 0.25 / 银行·非银 0.10），capex 缺失年按 OCF × 该比例估算维持性支出，替代固定 0.20（消除重资产股 FCF 虚高、轻资产股虚低）。`dcf_valuation` 返回 dict 新增 `capex_estimated` 布尔标记兜底年份。

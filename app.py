@@ -10,6 +10,7 @@
   - 交互式估值走势图、DCF 敏感性热力图（plotly，鼠标悬停查看）
   - KPI 卡片、基本面/DCF 表、市场情绪与个股 PE/PB 分位、评分明细
   - 「批量排名」tab：多标的打分排序
+  - 「历史回测」tab：调仓/选股/日频净值/换仓成本，业绩度量 + 各等级前向收益验证信号有效性
   - 支持 --demo 离线模式（无需网络）
 
 复用 main.main(ctx, quiet=True) 的完整分析管线，本文件只负责交互与可视化呈现。
@@ -23,8 +24,14 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-from config import StockContext
+from config import (
+    StockContext, END_DATE,
+    BACKTEST_REBALANCE_FREQ, BACKTEST_HOLD_PERIOD, BACKTEST_TOP_N,
+    BACKTEST_MIN_GRADE, BACKTEST_WEIGHT, BACKTEST_TXN_COST,
+    BACKTEST_BENCHMARK, BACKTEST_LOOKBACK_YEARS, BACKTEST_RISK_FREE,
+)
 from data import fetch_stock_list, generate_stock_list, search_stocks
+from analysis import run_backtest, BacktestResult
 from main import main, run_batch, BATCH_DEMO_LIST
 
 # -- 配色（与 matplotlib 图表 / HTML 报告保持一致）---------
@@ -60,6 +67,17 @@ def run_batch_silent(demo=True, items=None):
     buf = io.StringIO()
     with redirect_stdout(buf):
         return run_batch(items or BATCH_DEMO_LIST, demo=demo)
+
+
+def run_backtest_silent(items, *, demo, start, end, **kwargs):
+    """静默执行回测（复用 analysis.run_backtest），返回 BacktestResult。
+
+    kwargs 透传 run_backtest 的 freq/hold_days/top_n/min_grade/weight/txn_cost/benchmark。
+    demo 走 generate_all_demo_data(backtest=True) 全程无网；live 需联网预取。
+    """
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        return run_backtest(items, start=start, end=end, demo=demo, **kwargs)
 
 
 def _parse_batch_text(text: str) -> list:
@@ -200,6 +218,81 @@ def score_bar(score):
     return fig
 
 
+# -- 回测图表（plotly 交互版，与 backtest_charts.py 同口径）--
+def equity_figure(result):
+    """策略 vs 基准净值曲线。"""
+    eq = result.equity_curve
+    fig = go.Figure()
+    if eq is None or eq.empty:
+        return fig
+    fig.add_trace(go.Scatter(
+        x=eq.index, y=eq.values, name="策略净值",
+        line=dict(color=COLORS["price"], width=1.8),
+        hovertemplate="%{x|%Y-%m-%d}<br>净值 %{y:.3f}<extra>策略</extra>",
+    ))
+    bench = result.benchmark_curve
+    if bench is not None and not bench.empty:
+        b = bench.reindex(eq.index, method="ffill")
+        b0 = b.iloc[0] if not b.empty and b.iloc[0] > 0 else 1.0
+        fig.add_trace(go.Scatter(
+            x=b.index, y=(b / b0).values, name="基准（沪深300）",
+            line=dict(color="#9aa0a6", width=1.3, dash="dash"),
+            hovertemplate="%{x|%Y-%m-%d}<br>净值 %{y:.3f}<extra>基准</extra>",
+        ))
+    # 调仓日竖线
+    for rd in result.rebalance_dates:
+        fig.add_vline(x=rd, line_color="#bbb", line_width=0.6, line_dash="dot",
+                      opacity=0.5)
+    fig.update_layout(xaxis_title="日期", yaxis_title="累计净值（起点=1.0）",
+                      height=440, hovermode="x unified",
+                      legend=dict(orientation="h", y=1.08), margin=dict(t=40))
+    return fig
+
+
+def drawdown_figure(result):
+    """水下回撤图（cummax 回撤比例，填色到 0）。"""
+    eq = result.equity_curve
+    fig = go.Figure()
+    if eq is None or eq.empty:
+        return fig
+    cummax = eq.cummax()
+    dd = ((eq - cummax) / cummax.replace(0, np.nan) * 100).fillna(0)
+    fig.add_trace(go.Scatter(
+        x=dd.index, y=dd.values, name="回撤", fill="tozeroy",
+        line=dict(color=COLORS["cons"], width=1),
+        fillcolor="rgba(211,47,47,0.30)",
+        hovertemplate="%{x|%Y-%m-%d}<br>回撤 %{y:.2f}%<extra></extra>",
+    ))
+    mdd = (result.metrics or {}).get("max_drawdown")
+    title = "回测水下图（最大回撤）"
+    if mdd is not None:
+        title += f"  ·  最大回撤 ≈ {mdd * 100:.1f}%"
+    fig.update_layout(xaxis_title="日期", yaxis_title="回撤（%）",
+                      height=320, showlegend=False, margin=dict(t=40))
+    fig.update_layout(title=dict(text=title, font=dict(size=13)))
+    return fig
+
+
+def grade_returns_figure(result):
+    """各等级平均前向收益柱状图（验证 A/B/C/D 单调性）。"""
+    gfr = result.grade_forward_returns or {}
+    grades = ["A", "B", "C", "D"]
+    means = [(sum(gfr.get(g, [])) / len(gfr.get(g, []))) * 100
+             if gfr.get(g) else 0.0 for g in grades]
+    samples = [len(gfr.get(g, [])) for g in grades]
+    fig = go.Figure(go.Bar(
+        x=grades, y=means,
+        marker_color=[GRADE_COLOR[g] for g in grades],
+        text=[f"{m:+.2f}%" if n > 0 else "无样本" for m, n in zip(means, samples)],
+        textposition="outside", width=0.55,
+        hovertemplate="等级 %{x}<br>平均前向收益 %{y:+.2f}%<extra></extra>",
+    ))
+    fig.add_hline(y=0, line_color="#000", line_width=0.8)
+    fig.update_layout(yaxis_title="平均前向收益（%）", xaxis_title="综合评分等级",
+                      height=340, showlegend=False, margin=dict(t=20, b=10))
+    return fig
+
+
 # -- 渲染：单股分析 ----------------------------------------
 def render_single(res):
     ctx = res["ctx"]
@@ -313,6 +406,90 @@ def render_batch(df):
     st.success(f"★ 推荐重点关注（评分前 3）：{', '.join(df.head(3)['名称'])}")
 
 
+# -- 渲染：历史回测 ---------------------------------------
+def render_backtest(result: BacktestResult):
+    """渲染回测结果：业绩 KPI + 净值/回撤/等级图 + 持仓表 + 信号结论 + 限定。"""
+    m = result.metrics or {}
+
+    def _pct(v):
+        return f"{v * 100:.2f}%" if v is not None else "N/A"
+
+    def _num(v, d=2):
+        return f"{v:.{d}f}" if v is not None else "N/A"
+
+    st.markdown("#### 📊 回测业绩度量")
+    r1 = st.columns(4)
+    r1[0].metric("总收益", _pct(m.get("total_return")))
+    r1[1].metric("年化收益 CAGR", _pct(m.get("cagr")))
+    r1[2].metric("年化波动率", _pct(m.get("volatility")))
+    r1[3].metric("最大回撤", _pct(m.get("max_drawdown")))
+    r2 = st.columns(4)
+    r2[0].metric("Sharpe 比率", _num(m.get("sharpe")))
+    r2[1].metric("胜率", _pct(m.get("win_rate")))
+    r2[2].metric("Alpha（vs 基准）", _pct(m.get("alpha")))
+    r2[3].metric("Beta（vs 基准）", _num(m.get("beta")))
+    st.caption(f"无风险利率：{_pct(m.get('risk_free'))}　·　调仓期数：{len(result.rebalance_dates)}")
+
+    eq = result.equity_curve
+    st.markdown("#### 📈 净值曲线（策略 vs 基准 · 点线=调仓日）")
+    if eq is not None and not eq.empty:
+        st.plotly_chart(equity_figure(result), use_container_width=True)
+        st.markdown("#### 📉 水下回撤图")
+        st.plotly_chart(drawdown_figure(result), use_container_width=True)
+    else:
+        st.warning("净值曲线为空（可能调仓期内无数据或全部退市）。")
+
+    st.markdown("#### 🎯 各等级平均前向收益（信号单调性验证）")
+    gcol, tcol = st.columns([1, 1.05])
+    with gcol:
+        st.plotly_chart(grade_returns_figure(result), use_container_width=True)
+    with tcol:
+        gfr = result.grade_forward_returns or {}
+        grades = ["A", "B", "C", "D"]
+        rows = []
+        for g in grades:
+            seq = gfr.get(g, [])
+            rows.append({"等级": g, "样本数": len(seq),
+                         "平均前向收益": f"{(sum(seq) / len(seq)) * 100:+.2f}%" if seq else "—"})
+        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+        means = {g: (sum(gfr.get(g, [])) / len(gfr.get(g, []))
+                    if gfr.get(g) else None) for g in grades}
+        best = next((g for g in grades if means[g] is not None), None)
+        worst = next((g for g in reversed(grades) if means[g] is not None), None)
+        if best and worst and best != worst:
+            valid = means[best] > means[worst]
+            verdict = "有效" if valid else "无效"
+            st.success(f"★ {best} 级 {means[best] * 100:+.2f}% vs {worst} 级 "
+                       f"{means[worst] * 100:+.2f}% → 信号{verdict}"
+                       f"（高等级{'跑赢' if valid else '未跑赢'}低等级）")
+        elif best:
+            st.info(f"仅有 {best} 级样本，无法做等级间对比，信号有效性待更多样本。")
+        else:
+            st.warning("无足够等级样本，信号有效性无法判定。")
+
+    st.markdown("#### 📋 持仓明细（逐调仓期）")
+    pos_rows = []
+    for pos in result.positions:
+        dstr = pd.Timestamp(pos["date"]).strftime("%Y-%m-%d")
+        for h in pos["holdings"]:
+            fr = h.get("forward_return")
+            pos_rows.append({
+                "调仓日": dstr, "代码": h["symbol"], "等级": h["grade"],
+                "评分": round(h["score"], 1), "权重": f"{h['weight'] * 100:.1f}%",
+                "前向收益": f"{fr * 100:+.2f}%" if fr is not None else "—",
+                "退市/停牌": "是" if h.get("delisted") else "",
+            })
+    if pos_rows:
+        st.dataframe(pd.DataFrame(pos_rows), use_container_width=True,
+                     hide_index=True, height=300)
+    else:
+        st.caption("无持仓记录（可能所有标的均未达 min_grade）。")
+
+    st.info("⚠️ 本回测为「准 PIT」口径（AkShare 财务可能重述）+ 幸存者偏差"
+            "（仅含当前在市标的）+ 简化成本（未计滑点/税/停牌流动性），"
+            "非严格历史回测，结论仅供研究参考。")
+
+
 # -- 主界面 -----------------------------------------------
 st.title("📊 量化价值投资分析系统")
 st.caption("基本面筛选 · DCF 估值 · 市场情绪 · 综合评分 · 敏感性 · 批量选股")
@@ -370,7 +547,7 @@ with st.sidebar:
     st.divider()
     st.caption("实盘模式需联网与 AkShare；Demo 模式数据为模拟，非真实行情。")
 
-tab_single, tab_batch = st.tabs(["单股分析", "批量排名"])
+tab_single, tab_batch, tab_backtest = st.tabs(["单股分析", "批量排名", "历史回测"])
 
 with tab_single:
     if "single" in st.session_state:
@@ -400,3 +577,61 @@ with tab_batch:
                     st.error(f"批量分析失败：{e}")
     if "batch" in st.session_state:
         render_batch(st.session_state["batch"])
+
+with tab_backtest:
+    st.markdown("验证综合评分信号在历史上是否有效（A/B 级是否跑赢 D 级与基准）。"
+                "回测以数据注入方式复用四步+评分，**不改算法与权重**。")
+    st.caption("当前模式：" + ("Demo（离线模拟数据，全程无网）" if demo else "在线（联网预取全量数据，较慢）")
+               + "。可在左侧栏切换 Demo 模式。")
+
+    # -- 回测参数 --
+    bt_end_year = int(END_DATE[:4])
+    p1, p2, p3, p4 = st.columns(4)
+    bt_start_year = p1.number_input("回测起始年", min_value=2010, max_value=bt_end_year,
+                                    value=bt_end_year - BACKTEST_LOOKBACK_YEARS)
+    bt_end_in = p2.number_input("回测结束年", min_value=2010, max_value=bt_end_year,
+                                value=bt_end_year)
+    freq_opts = ["M", "Q", "Y"]
+    freq = p3.selectbox("调仓频率", freq_opts,
+                        index=freq_opts.index(BACKTEST_REBALANCE_FREQ))
+    grade_opts = ["A", "B", "C", "D"]
+    min_grade = p4.selectbox("最低入选等级", grade_opts,
+                             index=grade_opts.index(BACKTEST_MIN_GRADE))
+    q1, q2, q3, q4 = st.columns(4)
+    top_n = int(q1.number_input("每期 top_n", min_value=1, max_value=50,
+                                value=BACKTEST_TOP_N, step=1))
+    w_opts = ["equal", "score"]
+    weight = q2.selectbox("组合权重", w_opts, index=w_opts.index(BACKTEST_WEIGHT))
+    txn = q3.number_input("单边交易成本(%)", min_value=0.0, max_value=2.0,
+                          value=BACKTEST_TXN_COST * 100, step=0.05) / 100.0
+    hold = int(q4.number_input("持有期(交易日,0=至下期)", min_value=0, max_value=252,
+                               value=BACKTEST_HOLD_PERIOD or 0, step=1))
+    hold_days = None if hold == 0 else hold
+
+    bt_text = st.text_area(
+        "标的清单（每行 `代码,名称` 或仅 `代码`；留空用内置清单）",
+        value=_batch_default_text(), height=120, key="bt_symbols",
+        help="每行一只标的，格式 `代码,名称` 或仅代码；# 开头为注释。留空则用内置清单。",
+    )
+    bt_label = "▶ 运行回测" + ("（Demo）" if demo else "（在线逐只联网预取）")
+    if st.button(bt_label, type="primary"):
+        items = _parse_batch_text(bt_text) if bt_text.strip() else BATCH_DEMO_LIST
+        if not items:
+            st.error("未解析到任何标的，请按每行 `代码,名称` 输入。")
+        else:
+            start = f"{int(bt_start_year)}0101"
+            end = f"{int(bt_end_in)}1231"
+            with st.spinner(f"回测中（{len(items)} 只 · {start}~{end} · "
+                            f"freq={freq} · {'Demo' if demo else '在线'}，请稍候...）"):
+                try:
+                    st.session_state["backtest"] = run_backtest_silent(
+                        items, demo=demo, start=start, end=end,
+                        freq=freq, hold_days=hold_days, top_n=top_n,
+                        min_grade=min_grade, weight=weight, txn_cost=txn,
+                        benchmark=BACKTEST_BENCHMARK)
+                except Exception as e:
+                    st.error(f"回测失败：{e}")
+    if "backtest" in st.session_state:
+        render_backtest(st.session_state["backtest"])
+    else:
+        st.info("👆 设置回测参数后点击「▶ 运行回测」。Demo 模式可即刻离线验证回测机制。")

@@ -69,6 +69,7 @@ def generate_financial_abstract(
     start_year: int = FIN_START,
     end_year: int = FIN_END,
     seed: int = 43,
+    quality: float = 1.0,
 ) -> pd.DataFrame:
     """
     生成财务摘要数据。
@@ -79,6 +80,10 @@ def generate_financial_abstract(
       净利润 ~1100-1300 亿
       归母权益 ~18000-21000 亿
       总股本 ~197.56 亿股
+
+    quality（默认 1.0）：按标的"质量因子"等比缩放 ROE/净利/OCF/权益（资产负债率
+    与总股本不缩放——前者行业结构性、后者口径稳定），用于回测 demo 制造截面
+    分散。quality=1.0 时与历史口径逐字节一致（x*1.0==x），保证 main --demo 零回归。
     """
     np.random.seed(seed)
     years = list(range(start_year, end_year + 1))
@@ -86,13 +91,13 @@ def generate_financial_abstract(
 
     for year in years:
         t = (year - start_year)
-        roe = 11.5 + t * 0.3 + np.random.uniform(-0.5, 0.5)
+        roe = (11.5 + t * 0.3 + np.random.uniform(-0.5, 0.5)) * quality
         debt_ratio = 91 + t * 0.2 + np.random.uniform(-0.3, 0.3)
-        net_profit = 1150 + t * 20 + np.random.uniform(-30, 30)
+        net_profit = (1150 + t * 20 + np.random.uniform(-30, 30)) * quality
         # OCF scaled for realistic DCF: ~180亿 vs actual ~1300亿
         # DCF per-share val = ~15-20元 (matching simulated price)
-        ocf = 180 + t * 12 + np.random.uniform(-8, 8)
-        equity = 18500 + t * 500 + np.random.uniform(-200, 200)
+        ocf = (180 + t * 12 + np.random.uniform(-8, 8)) * quality
+        equity = (18500 + t * 500 + np.random.uniform(-200, 200)) * quality
         total_shares = 197.56e8
 
         rows.append({
@@ -114,20 +119,23 @@ def generate_cashflow_detail(
     start_year: int = FIN_START,
     end_year: int = FIN_END,
     seed: int = 44,
+    quality: float = 1.0,
 ) -> pd.DataFrame:
     """
     生成现金流量表数据：
       - "购建固定资产..."：资本性支出（CAPEX，用于 FCF = OCF − CAPEX×0.7）
       - "折旧与摊销"：D&A（用于破产清算情景 FCF − D&A）
+
+    quality 等比缩放 CAPEX/D&A（随业务规模变化）；1.0 时与历史口径逐字节一致。
     """
     np.random.seed(seed)
     years = list(range(start_year, end_year + 1))
     rows = []
     for year in years:
         t = year - start_year
-        capex = 50 + np.random.uniform(-10, 10)
+        capex = (50 + np.random.uniform(-10, 10)) * quality
         # 折旧+摊销，银行典型 ~32-43 亿/年，随年小幅上升
-        da = 35 + t * 1.5 + np.random.uniform(-3, 3)
+        da = (35 + t * 1.5 + np.random.uniform(-3, 3)) * quality
         rows.append({
             "报告期": pd.Timestamp(f"{year}-12-31"),
             "购建固定资产、无形资产和其他长期资产支付的现金": int(capex * 1e8),
@@ -141,6 +149,7 @@ def generate_dividend(
     start_year: int = FIN_START,
     end_year: int = FIN_END,
     seed: int = 45,
+    quality: float = 1.0,
 ) -> pd.DataFrame:
     """
     生成分红记录数据，列名匹配 stock_history_dividend_detail 的输出。
@@ -148,13 +157,15 @@ def generate_dividend(
       - "派息"列存储每10股金额（与 stock_history_dividend_detail 一致）
       - 公告日期 = 年报发布年份（即分红年份 + 1）
     平安银行近年每10股派息约 4.0-5.0 元（即每股 0.40-0.50 元）。
+
+    quality 等比缩放每10股派息金额（高质量标的分红更厚）；1.0 时与历史口径逐字节一致。
     """
     np.random.seed(seed)
     years = list(range(start_year, end_year + 1))
     rows = []
     for year in years:
         # 每10股金额（不是每股！）
-        div_per_10shares = 4.0 + np.random.uniform(-0.3, 0.7)
+        div_per_10shares = (4.0 + np.random.uniform(-0.3, 0.7)) * quality
         month = np.random.randint(6, 9)
         day = np.random.randint(5, 25)
         rows.append({
@@ -240,23 +251,40 @@ def _seed_for(symbol: str, base: int) -> int:
     return base + (sum(ord(c) for c in str(symbol)) % 1000)
 
 
+def _quality_for(symbol: str) -> float:
+    """由股票代码派生稳定"质量因子" q（回测 demo 专用，截面分散用）。
+
+    q ∈ [0.85, 1.35]：高质量标的 ROE/净利/OCF/PE 等比上移，低质量下移，
+    与时间趋势、价格 GBM 共同制造 A/B/C/D 等级分散，使回测 demo 有意义。
+    同一标的跨运行稳定（确定性、按种子派生，非随机）。
+    """
+    return 0.85 + (sum(ord(c) for c in str(symbol)) % 100) / 200.0
+
+
 def generate_stock_indicator(
     symbol: str = STOCK_CODE,
     start: str = START_DATE,
     end: str = END_DATE,
     seed: int = 47,
+    quality: float = 1.0,
 ) -> pd.DataFrame:
     """
     生成个股历史估值指标（PE / PB / 股息率），用于真实的历史分位计算。
     模拟平安银行（银行股典型低估值）：PE ~4–6，PB ~0.5–0.7。
+
+    quality 等比缩放 PE/PB 中枢与 clip 上下界（高质量标的估值中枢上移，
+    估值更贵 → 估值/情绪分适度下移，与高 ROE 的质量分对冲，制造 A/B/C/D
+    二维分散而非单调全 A）；1.0 时与历史口径逐字节一致。
     """
     np.random.seed(seed)
     dates = pd.bdate_range(start=start, end=end, freq="B")
     n = len(dates)
     # 缓慢漂移 + 噪声，避免分位极端化
     drift = np.linspace(0, 0.4, n)
-    pe = np.clip(np.random.normal(4.8, 0.5, n) + drift, 3.5, 7.5)
-    pb = np.clip(np.random.normal(0.55, 0.06, n) + drift / 10, 0.4, 0.95)
+    pe = np.clip(np.random.normal(4.8, 0.5, n) * quality + drift,
+                 3.5 * quality, 7.5 * quality)
+    pb = np.clip(np.random.normal(0.55, 0.06, n) * quality + drift / 10,
+                 0.4 * quality, 0.95 * quality)
     div = np.clip(np.random.normal(1.3, 0.12, n), 0.8, 2.2)
     return pd.DataFrame({
         "日期": dates,
@@ -329,28 +357,76 @@ def generate_industry_info(symbol: str = STOCK_CODE) -> dict:
     }
 
 
-def generate_all_demo_data(ctx=None) -> dict:
+def generate_all_demo_data(ctx=None, *, backtest: bool = False) -> dict:
     """
     一次性生成所有分析步骤所需的模拟数据。
     返回的字典键与主流程中的 fetch_* 函数返回类型一致。
 
     可选传入 StockContext：按其标的/日期范围生成，并按标的派生种子，
     使批量 demo 的各标的得分存在差异（非真实数据，仅验证逻辑）。
+
+    backtest（默认 False）：True 时生成回测专用的**宽跨度多报告期序列**——
+    财务/现金流/分红/PE-PB 跨 year(START_DATE)−5 ~ year(END_DATE) 全期，并按
+    标的派生质量因子 quality 缩放，使 D1 截断到任意 as_of 都能取到"该时点已知
+    的多期财务"且截面有 A/B/C/D 分散。backtest=False（默认）仍取 FIN_START..FIN_END
+    最近若干年、quality=1.0，与 main --demo 口径逐字节一致（零回归）。
     """
     sym = ctx.symbol if ctx is not None else STOCK_CODE
     start = ctx.start_date if ctx is not None else START_DATE
     end = ctx.end_date if ctx is not None else END_DATE
+
+    if backtest:
+        # 宽跨度财务期：覆盖日线区间 + PIT 披露滞后缓冲（earliest 调仓日仍有多期年报）
+        fin_start = int(START_DATE[:4]) - 5          # 2011
+        fin_end = int(END_DATE[:4])                 # 今年
+        quality = _quality_for(sym)                  # 按标的派生质量因子
+    else:
+        fin_start, fin_end, quality = FIN_START, FIN_END, 1.0
+
     return {
         "daily_df":     generate_daily_data(sym, start, end, seed=_seed_for(sym, 42)),
-        "fin_abstract": generate_financial_abstract(sym, FIN_START, FIN_END, seed=_seed_for(sym, 43)),
-        "cashflow_df":  generate_cashflow_detail(sym, FIN_START, FIN_END, seed=_seed_for(sym, 44)),
-        "dividend_df":  generate_dividend(sym, FIN_START, FIN_END, seed=_seed_for(sym, 45)),
+        "fin_abstract": generate_financial_abstract(sym, fin_start, fin_end,
+                                                   seed=_seed_for(sym, 43), quality=quality),
+        "cashflow_df":  generate_cashflow_detail(sym, fin_start, fin_end,
+                                                seed=_seed_for(sym, 44), quality=quality),
+        "dividend_df":  generate_dividend(sym, fin_start, fin_end,
+                                         seed=_seed_for(sym, 45), quality=quality),
         "market_df":    generate_market_overview(seed=46),
         "bond_yield":   generate_bond_yield_10y(),
-        "stock_indicator": generate_stock_indicator(sym, start, end, seed=_seed_for(sym, 47)),
+        "stock_indicator": generate_stock_indicator(sym, start, end,
+                                                   seed=_seed_for(sym, 47), quality=quality),
         # 市场情绪历史：市场口径（非按标的差异化），固定种子
         "market_pe_history":  generate_market_pe_history(seed=46),
         "bond_yield_history":  generate_bond_yield_history(seed=46),
         # 行业归属与总股本（demo 口径，对应实盘 fetch_industry_info）
         "industry_info":  generate_industry_info(sym),
     }
+
+
+def generate_benchmark_daily(
+    symbol: str = "000300",
+    start: str = START_DATE,
+    end: str = END_DATE,
+    seed: int = 99,
+) -> pd.DataFrame:
+    """
+    生成确定性模拟基准日线（沪深 300 口径），对应实盘 fetch_benchmark_daily。
+
+    与 demo 标的日线同种子流派（_seed_for 之外的固定种子 99，与市场口径一致——
+    基准为全市场口径不应按标的差异化），GBM 基价 ~3500（沪深 300 近年区间），
+    输出与 fetch_daily_data 同构的 [日期, 收盘] 表。供 --backtest-demo 离线可复现。
+    """
+    np.random.seed(seed)
+    dates = pd.bdate_range(start=start, end=end, freq="B")
+    n = len(dates)
+    base_price = 3500.0
+    annual_vol = 0.18
+    daily_vol = annual_vol / np.sqrt(250)
+    drift = 0.06 / 250
+    log_returns = np.random.normal(drift, daily_vol, n)
+    price = base_price * np.exp(np.cumsum(log_returns))
+    price = np.clip(price, 1500, 6500)
+    return pd.DataFrame({
+        "日期": dates,
+        "收盘": np.round(price, 2),
+    })

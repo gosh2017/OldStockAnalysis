@@ -15,18 +15,21 @@ OldStockAnalysis/
 │   ├── helpers.py           # 重试、会话注入、列名模糊匹配、股息率估算、ERP 模拟
 │   └── stats.py             # 分位数计算（scipy 优先，numpy 兜底）
 ├── data/
-│   ├── fetcher.py           # AkShare 数据拉取（日线/财务/现金流/分红/市场PE/国债/个股PE-PB/行业归属+总股本/股票列表）
-│   └── demo_data.py         # 离线模拟数据（seeded，按标的派生种子支持批量差异化）
+│   ├── fetcher.py           # AkShare 数据拉取（日线/财务/现金流/分红/市场PE/国债/个股PE-PB/行业归属+总股本/股票列表/基准指数）
+│   ├── demo_data.py         # 离线模拟数据（seeded，按标的派生种子支持批量差异化；backtest 宽跨度多报告期序列）
+│   └── pit.py               # 时点数据截断层（truncate / 披露滞后过滤 / as_of_bundle，回测专用）
 ├── analysis/
 │   ├── step1_fundamental.py # 基本面筛选（可配置阈值 ROE/股息率/覆盖年数）
 │   ├── step2_dcf.py         # DCF 三情景估值（行业化参数）+ 敏感性网格 + CAGR 显性增长率推导
 │   ├── step3_sentiment.py   # 股债性价比（10年ERP历史分位）+ 个股 PE/PB 自身历史分位
 │   ├── step4_advice.py      # 综合投资建议
-│   └── scoring.py           # 综合评分系统（0–100 / A–D）+ 完整度置信度
+│   ├── scoring.py           # 综合评分系统（0–100 / A–D）+ 完整度置信度
+│   └── backtest.py          # 历史回测引擎（analyze_as_of / run_backtest / compute_metrics）
 ├── visualization/
 │   ├── charts.py            # 估值走势图（matplotlib/plotly）+ 敏感性热力图
-│   └── report.py            # 自包含 HTML 投资报告
-├── tests/                   # pytest：评分/DCF 数学/分位数/筛选逻辑/行业分桶
+│   ├── report.py            # 自包含 HTML 投资报告
+│   └── backtest_charts.py   # 回测图表（净值曲线 / 水下回撤 / 等级前向收益柱状）
+├── tests/                   # pytest：评分/DCF 数学/分位数/筛选逻辑/行业分桶/回测引擎与PIT截断
 ├── charts/                  # 输出图表（gitignore）
 └── reports/                 # 输出 HTML 报告（gitignore）
 ```
@@ -43,7 +46,8 @@ OldStockAnalysis/
 | 综合评分 | 质量(40%)+估值(35%)+情绪(25%) → 0–100 分 + A–D 等级；估值含 PB-ROE 独立锚；**完整度温和折让**（数据稀疏标的不再虚高） |
 | 完整度置信度 | 覆盖/DCF数据/股息来源/ERP来源 → 高/中/低 标签，并作为综合评分折让因子，标注结果可信度 |
 | 批量选股 | 多标的逐只打分，按评分降序排名 |
-| Web 仪表盘 | `streamlit run app.py`：交互式输入标的、查看估值图/敏感性热力图/评分；批量排名支持 Demo 与在线（自定义标的逐只联网打分） |
+| 历史回测 | 验证信号历史有效性：`analyze_as_of`（时点数据注入复用四步+评分，不改算法）→ `run_backtest`（调仓/选股/日频净值/换仓成本）→ `compute_metrics`（CAGR/波动/回撤/Sharpe/Alpha/Beta）；`grade_forward_returns` 验证"A/B 是否跑赢 D"。准 PIT 截断（`data/pit.py`）避免未来函数 |
+| Web 仪表盘 | `streamlit run app.py`：交互式输入标的、查看估值图/敏感性热力图/评分；批量排名支持 Demo 与在线；**历史回测 tab**（调仓参数可调，净值/回撤/等级前向收益图 + 业绩 KPI + 持仓表 + 信号结论） |
 | 名称模糊搜索 | 直接输入名称（平安银行/茅台/平安）自动解析为代码；代码或名称均可，支持片段与错字近似 |
 
 ### 行业分桶
@@ -86,6 +90,14 @@ OldStockAnalysis/
 - **合理估值上限**：`min(中性 DCF, 过去 5 年 PE 中位数 × 当前 EPS)`，作为估值天花板，避免 DCF 对成熟股过度外推。EPS 按行业 `eps_method` 取：normalized（近 5 年净利均）/ shiller（周期股近 10 年净利平滑峰谷）。低 PE 股（银行/周期）的 PE 锚定常低于 DCF 内在价值，此时天花板压低保守/破产清算以保完整阶梯。
 - **敏感性**：永续增长率（行）× WACC（列）网格，每格显性增长率 = 该行永续增长率。
 
+### 历史回测验证
+
+回测层以"数据注入"方式复用 step1–4 / scoring，**不改其算法与权重**，验证综合评分信号在历史上是否有效。核心流程：`run_backtest` 在每个调仓日 T 对每标的调 `analyze_as_of`（用 `data/pit.py` 截断到 ≤ T 的准 PIT 数据，避免未来函数）得 score/grade/recommendation，按 `min_grade` + `top_n` 选股、等权或得分加权持有，日频 mark-to-market 记净值、扣双边换仓成本；`grade_forward_returns` 把**全部**标的按等级分桶记 hold 期前向收益，`compute_metrics` 算 CAGR/波动/最大回撤/Sharpe/胜率/Alpha/Beta。
+
+- **时点完整性（准 PIT）**：AkShare 财务/现金流接口返回全历史且常含重述后数据，回测按"截止 as-of 日 T"显式截断所有输入序列（`truncate_to_date`），财报另按"报告期 + 披露滞后 120d"过滤（`filter_reports_by_pub_lag`，避免把未披露年报当已知）。**非严格历史可得**——重述/幸存者偏差见「已知限定」。
+- **可配置**：`config.BACKTEST_*` 集中调仓频率（M/Q/Y）、持有期、top_n、最低等级、权重、交易成本、基准、回溯年数、披露滞后、无风险利率。
+- **离线可复现**：`--backtest-demo` 用 seeded 模拟数据（跨 ~2011–今宽跨度多报告期 + 按标的派生 quality 因子制造 A/B/C/D 截面分散），全程无网；`--backtest FILE` 为实盘联网路径。
+
 ## 使用方法
 
 ```bash
@@ -112,6 +124,13 @@ python main.py --batch stocks.txt
 # 批量选股 demo（内置 5 只标的 + 模拟数据）
 python main.py --batch-demo
 
+# 历史回测 demo（内置标的 + 模拟数据，全程无网验证回测机制）
+python main.py --backtest-demo
+python main.py --backtest-demo --years 2018 2024 --no-chart   # 指定回测区间、不生图
+
+# 历史回测实盘（读 代码,名称 清单，需联网）
+python main.py --backtest stocks.txt
+
 # 自定义基本面年份范围与输出目录
 python main.py --demo --years 2020 2024 --out-dir output
 
@@ -129,9 +148,11 @@ streamlit run app.py
 | `--report` | 生成自包含 HTML 投资报告 |
 | `--no-chart` | 不生成图表文件 |
 | `--out-dir DIR` | 输出目录（图表/报告存于其下 charts/、reports/） |
-| `--years START END` | 基本面年份范围（默认 2021 2025） |
 | `--batch FILE` | 批量选股：读取 `代码,名称` 文本文件逐只打分 |
 | `--batch-demo` | 批量选股 demo：内置标的 + 模拟数据 |
+| `--backtest FILE` | 历史回测：读取 `代码,名称` 文本文件验证信号历史有效性（实盘联网） |
+| `--backtest-demo` | 历史回测 demo：内置标的 + seeded 模拟数据，全程无网验证回测机制 |
+| `--years START END` | 基本面年份范围（默认 2021 2025）；回测模式下复用为回测区间 |
 
 ## 配置
 
@@ -143,6 +164,9 @@ streamlit run app.py
 - `charts/valuation_<代码>.png`：股价 vs 三情景内在价值走势（matplotlib）
 - `charts/valuation_<代码>.html`：交互式估值图（Plotly，可选）
 - `charts/sensitivity_<代码>.png`：DCF 敏感性热力图（增长率×WACC，含现价等值线）
+- `charts/backtest_equity_backtest.{png,html}`：回测净值曲线（策略 vs 基准，`--backtest*`）
+- `charts/backtest_drawdown_backtest.png`：回测水下回撤图（`--backtest*`）
+- `charts/backtest_grade_returns_backtest.png`：各等级平均前向收益柱状图（`--backtest*`，验单调性）
 - `reports/report_<代码>_<日期>.html`：自包含 HTML 投资报告（`--report`）
 
 ## 测试
@@ -152,7 +176,7 @@ pip install pytest
 python -m pytest -q
 ```
 
-覆盖：综合评分（等级/重归一化/完整度折让/ROE 水平调制/OCF 中位数/资产负债率近 1 年）、DCF（三情景单调/wacc≤永续 guard/最小二乘 CAGR/capex 兜底/破产清算口径）、分位数 numpy/scipy 语义、筛选阈值与覆盖年数逻辑、行业分桶映射与画像完整性、年报优先取数与股息率行业化口径。
+覆盖：综合评分（等级/重归一化/完整度折让/ROE 水平调制/OCF 中位数/资产负债率近 1 年）、DCF（三情景单调/wacc≤永续 guard/最小二乘 CAGR/capex 兜底/破产清算口径）、分位数 numpy/scipy 语义、筛选阈值与覆盖年数逻辑、行业分桶映射与画像完整性、年报优先取数与股息率行业化口径、**回测 PIT 截断与披露滞后 / analyze_as_of 时点一致性与 fin 窗口前移 / run_backtest 结构与换仓成本 / compute_metrics 数学（总收益·最大回撤·常数 Sharpe=None·同曲线 Beta≈1）**。
 
 ## 依赖
 
@@ -168,5 +192,10 @@ Python 3.9+ · akshare · pandas · numpy · matplotlib · scipy（分位数，�
 - **demo 数据**：`--demo` 与 `--batch-demo` 使用按标的派生种子的模拟数据，仅用于验证逻辑，**非真实行情**。行业归属按标的差异化（demo 清单覆盖各桶），但财务/现金流形态仍为银行股近似（000001 口径），已知简化。
 - **AkShare 版本**：实测 1.17.85；`stock_a_indicator_lg` / `stock_market_pe_lg` 等接口漂移时各函数会降级到 demo/默认值。
 - **数据缓存**：实盘股票列表（24h）、个股 PE/PB 历史（12h，按 symbol 分文件）、市场历史 PE（24h）、国债收益率历史（24h）、行业归属+总股本（720h 月级，按 symbol 分文件）已落盘到 `.cache/`（pickle；取数失败/None 不落盘，避免把瞬时失败固化成空缓存）。离线环境无法验证 TTL 命中/过期行为，缓存正确性留待联网验证。
+- **历史回测（三段限定，非严格历史回测）**：
+  - **准 PIT**：AkShare 财务/现金流接口返回全历史且常含**重述后**数据，并非严格时点可得。回测按"截止 as-of 日 T"显式截断所有输入序列（`truncate_to_date`），财报另按"报告期 + 披露滞后 120d"过滤（`filter_reports_by_pub_lag`），但无法消除重述偏差——仅为准 PIT 口径，不得宣称"严格历史可得"。
+  - **幸存者偏差**：实盘回测标的清单来自当前在市标的（`fetch_stock_list` 即如此），已退市标的不在样本内，系统性高估策略表现。`--backtest-demo` 用模拟数据无此问题但非真实行情。
+  - **简化成本**：仅计双边交易费率（`BACKTEST_TXN_COST=0.001` 单边，换仓 round-trip 2×），未计滑点 / 印花税 / 停牌流动性冲击 / 涨跌停无法成交，净值偏乐观。
+  - `fetch_benchmark_daily`（沪深 300）实盘路径本环境无网未 runtime 验证，需联网复验；离线走 `generate_benchmark_daily` 确定性模拟基准。
 
 > 本工具仅供学习与研究参考，不构成投资建议。
