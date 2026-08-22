@@ -16,6 +16,8 @@
 复用 main.main(ctx, quiet=True) 的完整分析管线，本文件只负责交互与可视化呈现。
 """
 import io
+import json
+import os
 import re
 from contextlib import redirect_stdout
 
@@ -25,7 +27,7 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from config import (
-    StockContext, END_DATE,
+    StockContext, END_DATE, CACHE_DIR,
     BACKTEST_REBALANCE_FREQ, BACKTEST_HOLD_PERIOD, BACKTEST_TOP_N,
     BACKTEST_MIN_GRADE, BACKTEST_WEIGHT, BACKTEST_TXN_COST,
     BACKTEST_BENCHMARK, BACKTEST_LOOKBACK_YEARS, BACKTEST_RISK_FREE,
@@ -99,6 +101,65 @@ def _parse_batch_text(text: str) -> list:
 def _batch_default_text() -> str:
     """批量标的输入框默认文本（与 BATCH_DEMO_LIST 同步）。"""
     return "\n".join(f"{c},{n}" for c, n in BATCH_DEMO_LIST)
+
+
+# -- 仪表盘输入清单持久化 ---------------------------------
+# 把「批量排名 / 历史回测」两个输入框的标的文本缓存到 .cache/，
+# 下次启动 streamlit 时恢复上次的输入，免去重复录入。
+# 语义与 utils/cache.py 一致：任何读写异常都静默降级，不阻断主流程。
+_DASHBOARD_INPUTS_CACHE = os.path.join(CACHE_DIR, "dashboard_inputs.json")
+
+
+def _load_dashboard_inputs() -> dict:
+    """读取仪表盘输入清单缓存。返回 dict（可能为空）。"""
+    try:
+        if os.path.exists(_DASHBOARD_INPUTS_CACHE):
+            with open(_DASHBOARD_INPUTS_CACHE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                return data
+    except Exception as e:
+        print(f"[CACHE] 读取仪表盘输入缓存失败，回退默认：{e}")
+    return {}
+
+
+def _save_dashboard_inputs() -> None:
+    """把当前 session_state 中的批量/回测标的文本落盘。失败静默降级。
+
+    作为两个输入框的 on_change 回调，也供「➕ 添加 / ❌ 移除」后显式调用——
+    这些路径直接改写 widget 的 session_state，不会触发 on_change，需手动保存。"""
+    try:
+        os.makedirs(CACHE_DIR, exist_ok=True)
+        payload = {
+            "batch_symbols": st.session_state.get("batch_symbols", ""),
+            "bt_symbols": st.session_state.get("bt_symbols", ""),
+        }
+        with open(_DASHBOARD_INPUTS_CACHE, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"[CACHE] 写入仪表盘输入缓存失败（不影响本次结果）：{e}")
+
+
+def _active_input_lines(text: str) -> list:
+    """返回文本中的有效行（非空、非注释），用于去重与「已添加标的」展示。"""
+    return [ln.strip() for ln in str(text).splitlines()
+            if ln.strip() and not ln.strip().startswith("#")]
+
+
+def _remove_nth_active_line(key: str, n: int) -> None:
+    """从输入文本中删除第 n 个有效行（0 基），保留空行/注释行。"""
+    raw = str(st.session_state.get(key, "")).splitlines()
+    out, seen = [], 0
+    for line in raw:
+        s = line.strip()
+        is_active = bool(s) and not s.startswith("#")
+        if is_active and seen == n:
+            seen += 1
+            continue  # 跳过被删除的行
+        if is_active:
+            seen += 1
+        out.append(line)
+    st.session_state[key] = "\n".join(out)
 
 
 # -- plotly 图表构建 ---------------------------------------
@@ -494,6 +555,15 @@ def render_backtest(result: BacktestResult):
 st.title("📊 量化价值投资分析系统")
 st.caption("基本面筛选 · DCF 估值 · 市场情绪 · 综合评分 · 敏感性 · 批量选股")
 
+# -- 恢复上次启动时录入的批量排名 / 历史回测标的清单 --
+_inputs_cache = _load_dashboard_inputs()
+if "batch_symbols" not in st.session_state:
+    _cached = _inputs_cache.get("batch_symbols")
+    st.session_state["batch_symbols"] = _cached if _cached is not None else _batch_default_text()
+if "bt_symbols" not in st.session_state:
+    _cached = _inputs_cache.get("bt_symbols")
+    st.session_state["bt_symbols"] = _cached if _cached is not None else _batch_default_text()
+
 with st.sidebar:
     st.header("分析参数")
     demo = st.checkbox("Demo 模式（离线模拟数据）", value=False, help="无需联网，使用 seeded 模拟数据")
@@ -522,22 +592,23 @@ with st.sidebar:
         st.caption(f"已选：{name}（{code}）")
         _c1, _c2 = st.columns(2)
         _pair_key = f"{code},{name}"
-        if "batch_stocks" not in st.session_state:
-            st.session_state["batch_stocks"] = []
-        if "backtest_stocks" not in st.session_state:
-            st.session_state["backtest_stocks"] = []
         with _c1:
             if st.button("➕ 批量排名", use_container_width=True):
-                if _pair_key not in st.session_state["batch_stocks"]:
-                    st.session_state["batch_stocks"].append(_pair_key)
-                    st.rerun()
+                if _pair_key not in _active_input_lines(st.session_state.get("batch_symbols", "")):
+                    # 追加到输入框文本（保留注释/空行），与右侧「批量排名」输入框同步
+                    st.session_state["batch_symbols"] = (
+                        st.session_state.get("batch_symbols", "") + "\n" + _pair_key
+                    ).lstrip("\n")
+                    _save_dashboard_inputs()
                 else:
                     st.info(f"{name} 已在批量排名清单中", icon="ℹ️")
         with _c2:
             if st.button("➕ 历史回测", use_container_width=True):
-                if _pair_key not in st.session_state["backtest_stocks"]:
-                    st.session_state["backtest_stocks"].append(_pair_key)
-                    st.rerun()
+                if _pair_key not in _active_input_lines(st.session_state.get("bt_symbols", "")):
+                    st.session_state["bt_symbols"] = (
+                        st.session_state.get("bt_symbols", "") + "\n" + _pair_key
+                    ).lstrip("\n")
+                    _save_dashboard_inputs()
                 else:
                     st.info(f"{name} 已在历史回测清单中", icon="ℹ️")
     elif (not demo and stock_list is None
@@ -566,27 +637,26 @@ with st.sidebar:
         else:
             st.error("请先选择一个标的")
     st.divider()
-    # -- 已添加至清单的标的（批量排名 / 历史回测）--
-    st.caption("📋 已添加标的")
-    for _lst_key, _label in [("batch_stocks", "批量排名"), ("backtest_stocks", "历史回测")]:
-        _lst = st.session_state.setdefault(_lst_key, [])
-        if _lst:
-            with st.expander(f"{_label}（{len(_lst)} 只）", expanded=False):
+    # -- 已添加至清单的标的（批量排名 / 历史回测，与右侧输入框同步）--
+    st.caption("📋 已添加标的（与「批量排名 / 历史回测」输入框同步）")
+    for _key, _label in [("batch_symbols", "批量排名"), ("bt_symbols", "历史回测")]:
+        _lines = _active_input_lines(st.session_state.get(_key, ""))
+        with st.expander(f"{_label}（{len(_lines)} 行）", expanded=False):
+            if _lines:
                 _to_remove = []
-                for _i, _pair in enumerate(_lst):
-                    _cc, _cn = _pair.split(",", 1)
+                for _i, _line in enumerate(_lines):
                     _l = st.columns([4, 1])
-                    _l[0].caption(f"{_cc},{_cn}")
-                    _b = _l[1].button("❌", key=f"rm_{_lst_key}_{_i}", use_container_width=True)
-                    if _b:
+                    _l[0].caption(_line)
+                    if _l[1].button("❌", key=f"rm_{_key}_{_i}", use_container_width=True):
                         _to_remove.append(_i)
-                for _i in reversed(_to_remove):
-                    _lst.pop(_i)
+                for _i in reversed(sorted(_to_remove)):
+                    _remove_nth_active_line(_key, _i)  # 保留注释/空行，仅删该有效行
                 if _to_remove:
-                    st.rerun()  # 重跑以刷新清单
-        else:
-            with st.expander(f"{_label}（空）", expanded=False):
-                st.caption("在上方搜索股票后点「➕ 批量排名 / ➕ 历史回测」添加。")
+                    _save_dashboard_inputs()
+                    st.rerun()  # 重跑以刷新清单与输入框
+            else:
+                st.caption("在上方搜索股票后点「➕ 批量排名 / ➕ 历史回测」添加，"
+                           "或在右侧输入框直接编辑。")
     st.divider()
     st.caption("实盘模式需联网与 AkShare；Demo 模式数据为模拟，非真实行情。")
 
@@ -602,17 +672,16 @@ with tab_batch:
     st.markdown("对多只标的逐只打分并按综合评分排序。")
     st.caption("当前模式：" + ("Demo（离线模拟数据）" if demo else "在线（逐只联网分析，较慢）")
                + "。可在左侧栏切换 Demo 模式；左侧栏搜索后可直接添加至本清单，或在此手动编辑。")
-    _batch_pre = "\n".join(st.session_state.get("batch_stocks", []))
-    _batch_val = _batch_pre if _batch_pre.strip() else _batch_default_text()
     batch_text = st.text_area(
         "批量标的（每行 `代码,名称` 或仅 `代码`；留空用内置清单）",
-        value=_batch_val, height=120,
-        help="每行一只标的，格式 `代码,名称` 或仅代码；# 开头为注释。留空则用内置清单。",
+        key="batch_symbols", height=120,
+        help="每行一只标的，格式 `代码,名称` 或仅代码；# 开头为注释。留空则用内置清单。"
+             "清单自动保存，下次启动恢复上次输入。",
+        on_change=_save_dashboard_inputs,
     )
     btn_label = "▶ 运行批量打分" + ("（Demo）" if demo else "（在线逐只联网）")
     if st.button(btn_label, type="primary"):
-        _src = batch_text if batch_text.strip() else _batch_pre
-        items = _parse_batch_text(_src) if _src.strip() else BATCH_DEMO_LIST
+        items = _parse_batch_text(batch_text) if batch_text.strip() else BATCH_DEMO_LIST
         if not items:
             st.error("未解析到任何标的，请按每行 `代码,名称` 输入。")
         else:
@@ -666,17 +735,16 @@ with tab_backtest:
                                help="调仓后固定持有天数再卖出；0 表示持有至下一调仓日才卖出"))
     hold_days = None if hold == 0 else hold
 
-    _bt_pre = "\n".join(st.session_state.get("backtest_stocks", []))
-    _bt_val = _bt_pre if _bt_pre.strip() else _batch_default_text()
     bt_text = st.text_area(
         "标的清单（每行 `代码,名称` 或仅 `代码`；留空用内置清单）",
-        value=_bt_val, height=120, key="bt_symbols",
-        help="每行一只标的，格式 `代码,名称` 或仅代码；# 开头为注释。留空则用内置清单。左侧栏搜索后可直接添加至本清单。",
+        key="bt_symbols", height=120,
+        help="每行一只标的，格式 `代码,名称` 或仅代码；# 开头为注释。留空则用内置清单。"
+             "左侧栏搜索后可直接添加至本清单；清单自动保存，下次启动恢复上次输入。",
+        on_change=_save_dashboard_inputs,
     )
     bt_label = "▶ 运行回测" + ("（Demo）" if demo else "（在线逐只联网预取）")
     if st.button(bt_label, type="primary"):
-        _btp = _parse_batch_text(bt_text) if bt_text.strip() else _parse_batch_text(_bt_pre)
-        items = _btp if _btp else BATCH_DEMO_LIST
+        items = _parse_batch_text(bt_text) if bt_text.strip() else BATCH_DEMO_LIST
         if not items:
             st.error("未解析到任何标的，请按每行 `代码,名称` 输入。")
         else:

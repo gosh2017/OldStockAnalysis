@@ -48,6 +48,9 @@
 - README / CHANGELOG 同步提示词 A（DCF 估值）/ B（综合评分）/ C（情绪与基本面口径）三组合理性优化，条目以 `(A1)` 等回溯 `prompts/`。
 - 新增 `tests/test_helpers.py`（`pick_annual_row` / `estimate_dividend_yield` 行业化口径）；`test_dcf.py` / `test_scoring.py` / `test_sentiment.py` / `test_industry.py` 增 A1–A5 / B1–B4 / C1–C3 用例，`pytest -q` 99 项全绿，`--demo` / `--batch-demo` 跑通零回归。
 
+### 新增（仪表盘）
+- **输入清单跨启动持久化**：Streamlit 仪表盘「批量排名 / 历史回测」两个标的输入框的文本现缓存到 `.cache/dashboard_inputs.json`，下次启动 streamlit 自动恢复上次输入，免去重复录入。侧边栏「➕ 批量排名 / ➕ 历史回测」与「❌ 移除」现直接改写对应输入框文本（此前侧边栏追加与输入框脱节：首次渲染后追加不回填输入框），输入框成为唯一数据源；编辑（on_change）、追加、移除三处均即时落盘，失败静默降级不阻断主流程。新增 `tests/test_dashboard_inputs_cache.py`（6 例，AppTest 模拟跨会话恢复 / 追加 / 移除 / 注释行保留 / 无缓存回退默认清单）。
+
 ## [ae7baf6] - 2026-08-18
 
 ### 新增
