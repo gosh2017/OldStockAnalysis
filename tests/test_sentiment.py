@@ -203,3 +203,82 @@ def test_individual_pe_index_alignment_after_dropna():
     pct_window = percentile_of_score(pe_win.tolist(), current_pe)
     pct_full = percentile_of_score(pe_s.tolist(), current_pe)
     assert pct_window > pct_full
+
+
+# -- 市场口径优化：10 年窗口截断 / 保留负 ERP / 国债覆盖占比 / 近 N 日中位数 --
+
+def test_market_erp_window_truncation():
+    """Fix1：市场 ERP 历史按 SENTIMENT_HISTORY_DAYS 截断到近 10 年。
+    构造 >10 年月频 PE（2010–2026），中枢稳定确保截断按日期而非 ERP 值过滤；
+    断言返回 ERP 序列长度 == 窗口内 PE 日期数（< 全历史），used_full=False。
+    """
+    from analysis.step3_sentiment import _historical_erp_series
+
+    dates = pd.date_range("2010-01-01", "2026-01-01", freq="ME")
+    pe = pd.DataFrame({"日期": dates,
+                        "市盈率": [15.0 + (i % 5) for i in range(len(dates))]})
+    bond = pd.DataFrame({"日期": dates, "国债收益率": [0.023] * len(dates)})
+
+    erp, cov, used_full = _historical_erp_series(pe, bond, 0.023)
+    assert used_full is False
+    # 期望：窗口内（最近 SENTIMENT_HISTORY_DAYS 天）的 PE 日期数
+    cutoff = dates.max() - pd.Timedelta(days=config.SENTIMENT_HISTORY_DAYS)
+    expected = int((dates >= cutoff).sum())
+    assert len(erp) == expected
+    assert expected < len(dates)            # 2010 起的早期点确被排除
+    assert cov == 1.0                       # 国债覆盖全窗
+
+
+def test_market_erp_window_not_truncated_when_short():
+    """Fix1：PE 历史全在 10 年窗口内 → 不截断，全部点入分位。"""
+    from analysis.step3_sentiment import _historical_erp_series
+
+    pe = _pe_history(20.0)                  # 8 月度点 2024 起，全在 10 年内
+    bond = _bond_history()
+    erp, _cov, used_full = _historical_erp_series(pe, bond, 0.023)
+    assert used_full is False
+    assert len(erp) == 8                    # 全部 8 期（无越界过滤）
+
+
+def test_market_erp_keeps_negative_erp():
+    """Fix2：负 ERP（PE 极高 + 正常国债，泡沫期）作为真实"极度高估"状态保留。"""
+    from analysis.step3_sentiment import _historical_erp_series
+
+    dates = pd.date_range("2024-01-01", periods=6, freq="ME")
+    pe = pd.DataFrame({"日期": dates, "市盈率": [15.0, 20.0, 30.0, 60.0, 80.0, 15.0]})
+    bond = pd.DataFrame({"日期": dates, "国债收益率": [0.023] * 6})
+    erp, _cov, _uf = _historical_erp_series(pe, bond, 0.023)
+    # PE=60 → 1/60−0.023≈−0.0063；PE=80 → ≈−0.0105 → 负 ERP 须保留
+    assert min(erp) < 0.0
+    assert len(erp) == 6                    # 全部保留（不再按 >0 剔除）
+
+
+def test_erp_source_bond_sparse_coverage():
+    """Fix3：国债仅覆盖窗口尾部（占比 < 阈值）→ erp_source='real_partial'；
+    国债覆盖全窗 → 'real'。bond_real_coverage 字段方向正确。"""
+    pe_dates = pd.date_range("2016-01-01", "2024-12-31", freq="ME")
+    pe = pd.DataFrame({"日期": pe_dates, "市盈率": [15.0] * len(pe_dates)})
+
+    # 国债仅 2022–2024 → 覆盖 ~36/108 ≈ 0.33 < 0.5
+    bond_dates = pd.date_range("2022-01-01", "2024-12-31", freq="ME")
+    bond_sparse = pd.DataFrame({"日期": bond_dates, "国债收益率": [0.023] * len(bond_dates)})
+    s_sparse = market_sentiment(None, 0.023, None, pe, bond_sparse)
+    assert s_sparse["erp_source"] == "real_partial"
+    assert s_sparse["bond_real_coverage"] < 0.5
+
+    # 国债覆盖全窗 → real
+    bond_full = pd.DataFrame({"日期": pe_dates, "国债收益率": [0.023] * len(pe_dates)})
+    s_full = market_sentiment(None, 0.023, None, pe, bond_full)
+    assert s_full["erp_source"] == "real"
+    assert s_full["bond_real_coverage"] >= 0.5
+
+
+def test_recent_value_guard():
+    """Fix4：recent_value 短序列(<2k)取末值、长序列取近 k 中位数、空序列 None。"""
+    from utils import recent_value
+
+    short = pd.Series([10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0])  # 8 < 10
+    assert recent_value(short, k=5) == 80.0
+    long_ = pd.Series(list(range(20)))                                   # 20 >= 10
+    assert recent_value(long_, k=5) == 17.0            # 近 5 点 [15,16,17,18,19] 中位数
+    assert recent_value(pd.Series([], dtype=float), k=5) is None

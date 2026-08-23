@@ -360,3 +360,20 @@ def generate_historical_erp() -> list:
         bond_r = max(0.02, min(0.04, bond_r))
         erp_list.append((1 / pe) - bond_r)
     return erp_list
+
+
+def recent_value(series, k: int = 5) -> float | None:
+    """
+    取序列「当前值」的降噪口径：长度 ≥ 2k 时取最近 k 个点的中位数，
+    否则取末值。
+
+    用于市场 PE / 国债收益率等日频序列——单日值含噪声，近 N 日中位数更稳；
+    短序列（如 demo/测试的 8 个月度点）2k 守卫下直接取末值，保持既有期望。
+    series 可为 pandas Series / list / ndarray；全空返回 None。
+    """
+    s = pd.to_numeric(pd.Series(series), errors="coerce").dropna()
+    if len(s) == 0:
+        return None
+    if len(s) >= 2 * k:
+        return float(s.tail(k).median())
+    return float(s.iloc[-1])

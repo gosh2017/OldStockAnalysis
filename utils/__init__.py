@@ -9,6 +9,7 @@ from .helpers import (
     pick_annual_row,
     estimate_dividend_yield,
     generate_historical_erp,
+    recent_value,
 )
 from .stats import percentile_of_score
 from .cache import disk_cache, clear_cache
@@ -20,6 +21,7 @@ __all__ = [
     "pick_annual_row",
     "estimate_dividend_yield",
     "generate_historical_erp",
+    "recent_value",
     "percentile_of_score",
     "disk_cache",
     "clear_cache",

@@ -33,8 +33,9 @@ from config import (
     BACKTEST_REBALANCE_FREQ, BACKTEST_HOLD_PERIOD, BACKTEST_TOP_N,
     BACKTEST_MIN_GRADE, BACKTEST_WEIGHT, BACKTEST_TXN_COST,
     BACKTEST_BENCHMARK, BACKTEST_LOOKBACK_YEARS, BACKTEST_RISK_FREE,
+    BOND_SMOOTH_POINTS,
 )
-from utils import sep
+from utils import sep, recent_value
 from data import (
     fetch_daily_data,
     fetch_financial_abstract,
@@ -111,7 +112,8 @@ def main(ctx: StockContext, *, quiet: bool = False) -> dict:
         market_pe_history  = fetch_market_pe_history()
         bond_yield_history = fetch_bond_yield_history(ctx.end_date)
         if bond_yield_history is not None and not bond_yield_history.empty:
-            bond_yield = float(bond_yield_history["国债收益率"].iloc[-1])
+            # 近 N 日中位数降噪（序列不足 2N 取末值，见 recent_value）
+            bond_yield = recent_value(bond_yield_history["国债收益率"], BOND_SMOOTH_POINTS)
         else:
             bond_yield = fetch_bond_yield_10y(ctx.end_date)
         market_df       = None

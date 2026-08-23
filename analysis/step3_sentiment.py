@@ -20,43 +20,74 @@ numpy 兜底）。
 历史分位基准：优先用真实历史序列——市场历史 PE（乐咕 stock_market_pe_lg）
 + 国债历史（bond_china_yield），按日期对齐得历史 ERP；缺失时回退合成分布
 generate_historical_erp()。个股自身 PE/PB 历史分位由 stock_indicator 补充。
+
+市场 ERP 历史序列按 SENTIMENT_HISTORY_DAYS 截断到最近 N 天再算分位（与个股
+5 年窗口同源、按天），避免乐咕全历史（可追溯至 2000 前后，含 2007 泡沫等
+陈旧中枢）使当前低 PE 被判"极度便宜"。负 ERP（PE 极高 + 正常国债，泡沫期）
+作为真实"极度高估"状态保留在分位基准中，仅剔 |erp|≥1 的数据级异常。
 """
 import numpy as np
 import pandas as pd
 
-from config import INDIVIDUAL_PERCENTILE_WINDOW_YEARS
-from utils import sep, find_col_in, generate_historical_erp, percentile_of_score
+from config import (
+    INDIVIDUAL_PERCENTILE_WINDOW_YEARS,
+    SENTIMENT_HISTORY_DAYS,
+    BOND_REAL_MIN_FRACTION,
+    MARKET_PE_SMOOTH_POINTS,
+)
+from utils import sep, find_col_in, generate_historical_erp, percentile_of_score, recent_value
 
 
 def _historical_erp_series(market_pe_history: pd.DataFrame | None,
                            bond_yield_history: pd.DataFrame | None,
-                           bond_yield: float) -> tuple[list | None, bool]:
+                           bond_yield: float) -> tuple[list | None, float, bool]:
     """
     从市场历史 PE + 国债历史构造历史 ERP 序列（1/pe − bond，按日期对齐）。
 
-    国债历史按市场 PE 的日期 reindex + ffill 对齐（国债收益率慢变，日前向
-    填充合理）；早于国债起点的 PE 日期用标量 bond_yield 兜底。无国债历史时
-    整列用标量 bond_yield。返回 (erp 列表, used_real_bond)：
-      - erp 列表已 dropna、过滤 (0,1) 区间外异常，长度≥2；构造失败为 None
-        （调用方回退合成分布）。
-      - used_real_bond：是否实际用到了真实国债历史序列（False=整列标量兜底，
-        调用方据此标 erp_source="real_partial"）。
+    先按 SENTIMENT_HISTORY_DAYS 把市场 PE 截断到最近 N 天（与个股 5 年窗口
+    同源、按天），避免乐咕全历史含 2007 泡沫等陈旧中枢使当前低 PE 被判
+    "极度便宜"；窗口内不足 2 期回退全历史（used_full=True）。
+
+    国债历史按（窗口化后的）PE 日期 reindex + ffill 对齐（国债收益率慢变，
+    日前向填充合理）；早于国债起点的 PE 日期用标量 bond_yield 兜底。无国债
+    历史时整列用标量 bond_yield。
+
+    负 ERP（PE 极高 + 正常国债，泡沫期）是真实的"极度高估"状态，保留在分位
+    基准中；仅剔 |erp|≥1 的数据级异常（PE 已过滤 <500，故实际不会逼近 ±1）。
+
+    返回 (erp 列表, bond_real_coverage, used_full)：
+      - erp 列表已 dropna、过滤 |erp|<1，长度≥2；构造失败为 None（调用方回退
+        合成分布）。
+      - bond_real_coverage：窗口内非标量兜底的 PE 日期占比（0.0–1.0）。无国债
+        历史或整列标量兜底为 0.0；调用方据此按 BOND_REAL_MIN_FRACTION 阈值标
+        erp_source="real"/"real_partial"（国债历史仅 2020 起，长窗口会大部分
+        标量兜底，仍标 real 会高估可信度）。
+      - used_full：是否因窗口内不足 2 期回退了全历史（调用方据此打印 [!]）。
     """
     if market_pe_history is None or market_pe_history.empty:
-        return None, False
+        return None, 0.0, False
     pe = market_pe_history.copy()
     pe["日期"] = pd.to_datetime(pe["日期"], errors="coerce")
     pe["市盈率"] = pd.to_numeric(pe["市盈率"], errors="coerce")
     pe = pe.dropna(subset=["日期", "市盈率"])
     pe = pe[(pe["市盈率"] > 0) & (pe["市盈率"] < 500)]
     if pe.empty:
-        return None, False
+        return None, 0.0, False
     pe = (pe.sort_values("日期")
             .drop_duplicates(subset=["日期"])
             .set_index("日期"))
 
+    # -- 近 N 天窗口（窗口内不足 2 期回退全历史）--
+    used_full = False
+    cutoff = pe.index.max() - pd.Timedelta(days=SENTIMENT_HISTORY_DAYS)
+    pe_win = pe[pe.index >= cutoff]
+    if len(pe_win) >= 2:
+        pe = pe_win
+    else:
+        used_full = True
+
+    bond_real_coverage = 0.0
     bond_aligned = None
-    used_real_bond = False
     if bond_yield_history is not None and not bond_yield_history.empty:
         bd = bond_yield_history.copy()
         bd["日期"] = pd.to_datetime(bd["日期"], errors="coerce")
@@ -66,18 +97,22 @@ def _historical_erp_series(market_pe_history: pd.DataFrame | None,
                .drop_duplicates(subset=["日期"])
                .set_index("日期")["国债收益率"])
         if not bd.empty:
-            bond_aligned = bd.reindex(pe.index).ffill()      # 对齐到 PE 日期
-            bond_aligned = bond_aligned.fillna(bond_yield)    # 早于国债起点用标量
-            used_real_bond = True
+            reindexed = bd.reindex(pe.index)               # NaN = 该日无真实国债观测
+            bond_ffilled = reindexed.ffill()                 # 向前填充（真实派生）
+            scalar_mask = bond_ffilled.isna()                # 早于国债起点的缺口 → 标量兜底
+            bond_real_coverage = float(1 - scalar_mask.sum() / len(pe))
+            bond_aligned = bond_ffilled.fillna(bond_yield)   # 缺口用标量兜底
 
     if bond_aligned is None:
         bond_aligned = pd.Series(bond_yield, index=pe.index)
 
     erp = (1 / pe["市盈率"]) - bond_aligned
     erp = erp.replace([np.inf, -np.inf], np.nan).dropna()
-    erp = erp[(erp > 0) & (erp < 1)]                          # 过滤异常 ERP
+    erp = erp[(erp > -1) & (erp < 1)]                         # 仅剔数据级异常，保留负 ERP
     out = erp.tolist()
-    return (out if len(out) >= 2 else None, used_real_bond)
+    if len(out) < 2:
+        return None, bond_real_coverage, used_full
+    return out, bond_real_coverage, used_full
 
 
 def _recent_window(series: pd.Series, date_series: pd.Series,
@@ -121,12 +156,15 @@ def market_sentiment(market_df: pd.DataFrame | None,
     bond_yield_history（国债历史）按日期对齐得历史 ERP，当前 ERP 与之比分位
     （见 _historical_erp_series）；二者缺失时回退合成分布 generate_historical_erp()。
 
-    当前市场 PE 取值优先级：market_pe_history 末值 > market_df 快照中位数 > 默认 20。
+    当前市场 PE 取值优先级：market_pe_history 近 N 日中位数（短序列取末值）
+    > market_df 快照中位数 > 默认 20。
     可选 stock_indicator 计算个股自身 PE/PB 历史分位，并暴露 current_pe/current_pb
     供评分层 PB-ROE 锚使用（item 8）。erp_source 标历史分位来源可信度
-    （real/real_partial/synthetic，item 10）。
+    （real/real_partial/synthetic，item 10；real/real_partial 按 bond_real_coverage
+    对 BOND_REAL_MIN_FRACTION 阈值判定）。
     返回 pe_median/bond_yield/equity_risk_premium/percentile/sentiment/
-    pe_percentile/pb_percentile/market_pe_source/current_pe/current_pb/erp_source。
+    pe_percentile/pb_percentile/market_pe_source/current_pe/current_pb/
+    erp_source/bond_real_coverage。
     """
     sep("第三步：市场情绪辅助 — 股债性价比分析")
 
@@ -137,9 +175,11 @@ def market_sentiment(market_df: pd.DataFrame | None,
         pe_s = pd.to_numeric(market_pe_history["市盈率"], errors="coerce")
         pe_s = pe_s[(pe_s > 0) & (pe_s < 500)].dropna()
         if len(pe_s) > 0:
-            pe_median = float(pe_s.iloc[-1])           # 真实历史末值
+            # 近 N 日中位数降噪（序列不足 2N 取末值，见 recent_value）
+            pe_median = recent_value(pe_s, MARKET_PE_SMOOTH_POINTS)
             market_pe_source = "history"
-            print(f"\n  [DATA] 市场历史 PE（乐咕）末值: {pe_median:.2f}（共 {len(pe_s)} 期）")
+            print(f"\n  [DATA] 市场历史 PE（乐咕）当前值: {pe_median:.2f}"
+                  f"（近 {MARKET_PE_SMOOTH_POINTS} 日中位数，共 {len(pe_s)} 期）")
     if pe_median is None and market_df is not None and not market_df.empty:
         pe_col = find_col_in(["市盈率", "PE", "pe"], market_df)
         if pe_col:
@@ -170,21 +210,29 @@ def market_sentiment(market_df: pd.DataFrame | None,
     # -- 历史分位数（优先真实历史 ERP 序列，缺失回退合成分布）--
     # 高分位 = 当前 ERP 处于历史高位 = 股票相对便宜（低估）
     # erp_source 标注分位来源可信度：
-    #   real          = 真实 PE + 真实国债历史序列
-    #   real_partial  = 仅 PE 真实、国债整列标量兜底（可信度降低，[WARN] 不静默）
+    #   real          = 真实 PE + 国债真实覆盖占比 ≥ BOND_REAL_MIN_FRACTION
+    #   real_partial  = PE 真实但国债覆盖占比 < 阈值（大部分标量兜底，[WARN] 不静默）
     #   synthetic     = 无真实 PE 历史序列 → 合成分布兜底（[WARN] 不静默）
-    historical_erp, used_real_bond = _historical_erp_series(
+    historical_erp, bond_real_coverage, used_full = _historical_erp_series(
         market_pe_history, bond_yield_history, bond_yield)
     if historical_erp is None:
         historical_erp = generate_historical_erp()
         erp_source = "synthetic"
+        bond_real_coverage = 0.0
         print(f"  [WARN] 无真实历史序列，降级合成分布估算分位（{len(historical_erp)} 期）")
-    elif used_real_bond:
-        erp_source = "real"
-        print(f"  [INFO] 历史分位基于真实序列（{len(historical_erp)} 期 ERP）")
     else:
-        erp_source = "real_partial"
-        print(f"  [WARN] 历史分位仅 PE 真实、国债用标量兜底，可信度降低（{len(historical_erp)} 期 ERP）")
+        erp_source = ("real" if bond_real_coverage >= BOND_REAL_MIN_FRACTION
+                      else "real_partial")
+        if used_full:
+            print(f"  [!] 市场 ERP {SENTIMENT_HISTORY_DAYS // 365} 年窗口内样本不足，"
+                  f"回退全历史（{len(historical_erp)} 期）")
+        if erp_source == "real":
+            print(f"  [INFO] 历史分位基于真实序列（{len(historical_erp)} 期 ERP，"
+                  f"国债覆盖 {bond_real_coverage * 100:.0f}%）")
+        else:
+            print(f"  [WARN] 国债真实覆盖仅 {bond_real_coverage * 100:.0f}%"
+                  f"（< {BOND_REAL_MIN_FRACTION * 100:.0f}% 阈值），部分标量兜底，"
+                  f"可信度降低（{len(historical_erp)} 期 ERP）")
     percentile = percentile_of_score(historical_erp, equity_risk_premium)
     percentile = max(0, min(100, percentile))
 
@@ -262,4 +310,5 @@ def market_sentiment(market_df: pd.DataFrame | None,
         "current_pe": current_pe,
         "current_pb": current_pb,
         "erp_source": erp_source,
+        "bond_real_coverage": bond_real_coverage,
     }
