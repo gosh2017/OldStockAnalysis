@@ -133,7 +133,8 @@ def main(ctx: StockContext, *, quiet: bool = False) -> dict:
                 pe_s_mp = pe_s_mp[(pe_s_mp > 0) & (pe_s_mp < 500)].dropna()
                 if len(pe_s_mp) > 0:
                     market_pe = float(pe_s_mp.iloc[-1])
-        except Exception:
+        except (KeyError, ValueError, TypeError):
+            # 列名缺失/取值异常时回退 None（market_pe 为 best-effort 输入）
             market_pe = None
 
     screening = fundamental_screening(ctx.symbol, fin_abstract, daily_df, dividend_df,
@@ -196,8 +197,8 @@ def main(ctx: StockContext, *, quiet: bool = False) -> dict:
 
 
 def _fmt_price(val) -> str:
-    """格式化价格为字符串，缺失时返回 N/A。"""
-    return f"{val:.2f} 元" if val else "N/A"
+    """格式化价格为字符串，缺失（None）时返回 N/A；0 元如实显示。"""
+    return f"{val:.2f} 元" if val is not None else "N/A"
 
 
 def _fmt_num(x) -> str:
@@ -239,7 +240,7 @@ def _print_summary(ctx: StockContext, advice: dict, score: dict | None = None,
         ("市场情绪", str(advice.get("sentiment", "N/A"))),
     ]
     if score:
-        rows.append(("综合评分", f"{score.get('score', 0):.1f} / 100（{score.get('grade', '-')}）"))
+        rows.append(("综合评分", f"{score['score']:.1f} / 100（{score['grade']}）"))
     rows.append(("★ 操作建议", str(advice.get("recommendation", "N/A"))))
 
     label_w = max(_disp_width(lbl) for lbl, _ in rows)
@@ -289,15 +290,21 @@ def _read_batch_file(path: str) -> list:
     return items
 
 
-def run_batch(items: list, demo: bool = False) -> pd.DataFrame:
-    """对多只标的逐只执行分析并按综合评分排名。"""
+def run_batch(items: list, demo: bool = False, years=None) -> pd.DataFrame:
+    """对多只标的逐只执行分析并按综合评分排名。
+
+    years: 可选 (起始年, 结束年)，覆盖 config 默认基本面年份区间。
+    """
     mode = "demo" if demo else "live"
     print(f"\n{'=' * 70}\n  批量选股打分（{len(items)} 只标的 · {mode} 模式）\n{'=' * 70}")
 
     rows = []
     for symbol, name in items:
         # 批量模式抑制图表与逐只步骤打印，静默分析后仅汇总排名
-        ctx = StockContext(symbol=symbol, name=name, demo=demo, no_chart=True)
+        ctx_kwargs = dict(symbol=symbol, name=name, demo=demo, no_chart=True)
+        if years:
+            ctx_kwargs["fin_start"], ctx_kwargs["fin_end"] = years
+        ctx = StockContext(**ctx_kwargs)
         try:
             buf = io.StringIO()
             with redirect_stdout(buf):
@@ -330,6 +337,9 @@ def run_backtest_flow(items, *, demo: bool, years, no_chart: bool, out_dir: str 
     BACKTEST_LOOKBACK_YEARS 年。回测参数取 config.BACKTEST_* 集中配置。
     """
     if years:
+        if years[0] > years[1]:
+            print(f"[X] --years 起始年份 {years[0]} 晚于结束年份 {years[1]}，请调换顺序")
+            return
         start, end = f"{years[0]}0101", f"{years[1]}1231"
     else:
         end = END_DATE
@@ -361,10 +371,10 @@ def run_backtest_flow(items, *, demo: bool, years, no_chart: bool, out_dir: str 
         plot_drawdown(result, ctx)
         plot_grade_forward_returns(result, ctx)
 
-    _print_backtest_summary(result, items, demo)
+    _print_backtest_summary(result, demo)
 
 
-def _print_backtest_summary(result: BacktestResult, items, demo: bool) -> None:
+def _print_backtest_summary(result: BacktestResult, demo: bool) -> None:
     """打印回测业绩表 + 各等级前向收益表 + 信号有效性结论。"""
     m = result.metrics or {}
 
@@ -459,10 +469,20 @@ def _print_backtest_summary(result: BacktestResult, items, demo: bool) -> None:
 
 
 
+def _lookup_stock_name(code: str, demo: bool) -> str | None:
+    """按 6 位代码反查股票名称（best-effort：列表不可用/未命中返回 None，
+    由调用方兜底为代码本身，避免非默认标的被误标为默认名称）。"""
+    stock_list = generate_stock_list() if demo else fetch_stock_list()
+    if stock_list is None or stock_list.empty:
+        return None
+    hit = stock_list.loc[stock_list["代码"].astype(str) == code]
+    return None if hit.empty else str(hit["名称"].iloc[0])
+
+
 def resolve_symbol(query: str, demo: bool) -> tuple:
     """
     把用户输入解析为 (code, name)。支持：
-      - 6 位代码 → 直接用，名称留空（由 -n 或搜索补全）
+      - 6 位代码 → 反查股票列表取名称（best-effort，取不到由 _cli 兜底为代码）
       - 名称/片段 → 模糊搜索；唯一或高置信匹配直接采用，多匹配列出候选。
     解析失败返回 (None, None)。
     """
@@ -470,7 +490,7 @@ def resolve_symbol(query: str, demo: bool) -> tuple:
     if not q:
         return None, None
     if re.fullmatch(r"\d{6}", q):
-        return q, None  # 代码，名称未知
+        return q, _lookup_stock_name(q, demo)
     # 名称/模糊 → 搜索
     stock_list = generate_stock_list() if demo else fetch_stock_list()
     matches = search_stocks(q, stock_list, limit=8)
@@ -503,8 +523,8 @@ def _cli():
         help=f"股票代码或名称（如 000001 或 平安银行，名称支持模糊搜索；默认 {STOCK_CODE}）",
     )
     parser.add_argument(
-        "-n", "--name", default=STOCK_NAME,
-        help="股票名称（用于图表标题）",
+        "-n", "--name", default=None,
+        help="股票名称（用于图表标题）；不指定时默认标的取 平安银行，其它代码反查或回退代码",
     )
     parser.add_argument(
         "--demo", action="store_true",
@@ -526,19 +546,21 @@ def _cli():
         "--years", nargs=2, type=int, metavar=("START", "END"), default=None,
         help="基本面年份范围，如 --years 2020 2024（默认 config 的 2021 2025）",
     )
-    parser.add_argument(
+    # 四种运行模式互斥（同时指定两种 → argparse 报错，而非静默取先到者）
+    mode_group = parser.add_mutually_exclusive_group()
+    mode_group.add_argument(
         "--batch", default=None,
         help="批量选股：传入含 '代码,名称' 的文本文件路径逐只打分排名",
     )
-    parser.add_argument(
+    mode_group.add_argument(
         "--batch-demo", action="store_true",
         help="批量选股 demo：用内置标的清单 + 模拟数据打分排名（无需网络）",
     )
-    parser.add_argument(
+    mode_group.add_argument(
         "--backtest", default=None,
         help="历史回测：传入含 '代码,名称' 的文本文件，验证信号历史有效性（实盘联网）",
     )
-    parser.add_argument(
+    mode_group.add_argument(
         "--backtest-demo", action="store_true",
         help="历史回测 demo：内置标的清单 + seeded 模拟数据，全程无网验证回测机制",
     )
@@ -560,21 +582,25 @@ def _cli():
 
     # -- 批量模式分发 --
     if args.batch_demo:
-        run_batch(BATCH_DEMO_LIST, demo=True)
+        run_batch(BATCH_DEMO_LIST, demo=True, years=args.years)
         return
     if args.batch:
         items = _read_batch_file(args.batch)
         if not items:
             print(f"[X] 未从 {args.batch} 读到任何标的（每行格式：代码,名称）")
             return
-        run_batch(items, demo=args.demo)
+        run_batch(items, demo=args.demo, years=args.years)
         return
 
-    # 解析标的：代码直用，名称模糊搜索
+    # 解析标的：代码反查名称 / 名称模糊搜索
     code, name = resolve_symbol(args.symbol, args.demo)
     if not code:
         return
     stock_name = name or args.name
+    if stock_name is None:
+        # 未显式指定名称：默认标的用 STOCK_NAME，其它代码用代码本身兜底，
+        # 避免把非默认标的误标为 平安银行
+        stock_name = STOCK_NAME if code == STOCK_CODE else code
 
     kwargs = dict(symbol=code, name=stock_name, demo=args.demo,
                   report=args.report, no_chart=args.no_chart)

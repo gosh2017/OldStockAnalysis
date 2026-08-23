@@ -30,7 +30,7 @@ from config import (
     StockContext, END_DATE, CACHE_DIR,
     BACKTEST_REBALANCE_FREQ, BACKTEST_HOLD_PERIOD, BACKTEST_TOP_N,
     BACKTEST_MIN_GRADE, BACKTEST_WEIGHT, BACKTEST_TXN_COST,
-    BACKTEST_BENCHMARK, BACKTEST_LOOKBACK_YEARS, BACKTEST_RISK_FREE,
+    BACKTEST_BENCHMARK, BACKTEST_LOOKBACK_YEARS,
 )
 from data import fetch_stock_list, generate_stock_list, search_stocks
 from analysis import run_backtest, BacktestResult
@@ -369,6 +369,13 @@ def grade_returns_figure(result):
     return fig
 
 
+def _fmt_price(val) -> str:
+    """格式化价格为字符串，缺失（None）时返回 N/A；0 元如实显示。
+    与 main.py 口径一致——避免 banner 在 latest_price=None（DCF 无估值、
+    investment_advice 早返回）时 f"{None:.2f}" 触发 TypeError。"""
+    return f"{val:.2f} 元" if val is not None else "N/A"
+
+
 # -- 渲染：单股分析 ----------------------------------------
 def render_single(res):
     ctx = res["ctx"]
@@ -394,7 +401,7 @@ def render_single(res):
         f"</div>", unsafe_allow_html=True)
     c0.caption(f"基本面筛选：{'通过' if score.get('screened') else '未通过'}"
                f"　·　数据完整度：{score.get('completeness_tag', '-')}（{score.get('completeness', 0):.0f}）")
-    c1.metric("当前股价", f"{price:.2f} 元" if price else "N/A")
+    c1.metric("当前股价", _fmt_price(price))
     c2.metric("市场情绪", sentiment.get("sentiment", "N/A"),
               f"{sentiment.get('percentile', 0):.0f}% 分位" if sentiment.get("percentile") is not None else None)
     c3.markdown(
@@ -431,9 +438,14 @@ def render_single(res):
                     for n, p in params.items()]
             st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
             st.caption(f"基期 FCF：{dcf.get('base_fcf', 0)/1e8:.1f} 亿 · 总股本：{dcf.get('total_shares', 0)/1e8:.2f} 亿股")
-            if dcf.get("fair_value_ceiling"):
-                st.caption(f"合理估值上限: {dcf['fair_value_ceiling']:.2f} 元 "
-                           f"(过去5年PE中位 {dcf.get('pe_median_5y', 0):.1f} × 当前EPS {dcf.get('current_eps', 0):.2f})")
+            ceiling = dcf.get("fair_value_ceiling")
+            if ceiling:
+                pe_m = dcf.get("pe_median_5y")
+                eps = dcf.get("current_eps")
+                if pe_m is not None and eps is not None:
+                    st.caption(f"合理估值上限: {ceiling:.2f} 元 (过去5年PE中位 {pe_m:.1f} × 当前EPS {eps:.2f})")
+                else:
+                    st.caption(f"合理估值上限: {ceiling:.2f} 元（取中性 DCF，PE 锚定数据不足）")
         else:
             st.caption("不可用")
 
@@ -449,7 +461,8 @@ def render_single(res):
         st.markdown("#### 🌡️ 市场情绪与个股估值分位")
         m1, m2, m3, m4 = st.columns(4)
         m1.metric("全市场 PE 中位", f"{sentiment.get('pe_median', 0):.2f}")
-        m2.metric("10Y 国债", f"{sentiment.get('bond_yield', 0)*100:.2f}%")
+        _by = sentiment.get("bond_yield")
+        m2.metric("10Y 国债", f"{_by * 100:.2f}%" if _by is not None else "N/A")
         m3.metric("个股 PE 分位",
                   f"{sentiment.get('pe_percentile', 0):.0f}%" if sentiment.get("pe_percentile") is not None else "N/A")
         m4.metric("个股 PB 分位",
@@ -463,7 +476,7 @@ def render_single(res):
         f"<div style='background:linear-gradient(135deg,#1a3a5f,#2a72d0);color:#fff;"
         f"padding:18px 24px;border-radius:10px;margin-top:8px'>"
         f"<span style='font-size:14px;opacity:.85'>综合建议</span><br>"
-        f"<span style='font-size:26px;font-weight:700'>{ctx.stock_label} · 当前 {price:.2f} 元 → {advice.get('recommendation','N/A')}</span>"
+        f"<span style='font-size:26px;font-weight:700'>{ctx.stock_label} · 当前 {_fmt_price(price)} → {advice.get('recommendation','N/A')}</span>"
         f"</div>", unsafe_allow_html=True)
 
 
@@ -663,8 +676,9 @@ with st.sidebar:
                        + ("（实盘需联网获取股票列表）" if not demo else ""))
         code, name = None, None
     col_y1, col_y2 = st.columns(2)
-    fin_start = col_y1.number_input("基本面起始年", min_value=2010, max_value=2025, value=2021)
-    fin_end = col_y2.number_input("基本面结束年", min_value=2010, max_value=2025, value=2025)
+    _fy_max = int(END_DATE[:4])
+    fin_start = col_y1.number_input("基本面起始年", min_value=2010, max_value=_fy_max, value=2021)
+    fin_end = col_y2.number_input("基本面结束年", min_value=2010, max_value=_fy_max, value=2025)
     if st.button("🚀 开始分析", type="primary", use_container_width=True):
         if code:
             with st.spinner("正在执行四步分析 + 评分..."):
