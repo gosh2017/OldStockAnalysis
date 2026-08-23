@@ -103,9 +103,13 @@ def dcf_valuation(
                         供下游完整度置信度接线使用（本任务只暴露，不接 scoring）。
       各情景 intrinsic_value : wacc≤永续时该情景置 None（item A4，主路径防御性 guard）。
       base_fcf_liquidation : D&A 不可得时按 FCF×0.5 估算（item A5），不再回退归母净利润。
+      *_raw（neutral_raw/conservative_raw/liquidation_raw）: 市场 PE 锚定钳位之前的
+                        DCF 原始值。中性/保守/清算的「封顶后」值（neutral/conservative/
+                        liquidation）会被天花板钳到 liq≤c≤ceiling 阶梯（供 _judge_price
+                        分档）；*_raw 保留 DCF 原值供透明查阅，不接 scoring/advice。
 
     TODO（item A3）：估值安全边际非线性映射（恢复极端值区分度）归入 prompt B
-    （scoring.py 的 margin 子分改造），本层只暴露 conservative/neutral 原始值，不在此处映射。
+    （scoring.py 的 margin 子分改造），本层只暴露 *_raw 原始值，不在此处映射。
     """
     sep("第二步：估值锚定 — 自由现金流折现模型（DCF）")
 
@@ -180,7 +184,7 @@ def dcf_valuation(
                         non_annual_years.add(year)
                     if capex_col:
                         try:
-                            capex_values[year] = float(row[capex_col])
+                            capex_values[year] = abs(float(row[capex_col]))  # 兼容负号口径（与 D&A 对称）
                         except (ValueError, TypeError):
                             pass
                     if da_col or dep_col:
@@ -250,13 +254,14 @@ def dcf_valuation(
     }
 
     # -- 基期 FCF（加权均值，含负值不剔，item 3）--
-    all_fcf = [v for v in fcf_values.values() if v is not None]
+    all_fcf = list(fcf_values.values())   # 每年 fcf 必为有限 float（循环内无条件赋值）
     has_negative_fcf = bool(any(v < 0 for v in all_fcf))
     if not all_fcf:
         print("\n  [X] 无法计算有效 FCF，跳过 DCF 估值。")
         return {"valuations": None, "base_fcf": None, "base_fcf_liquidation": None,
                 "total_shares": None, "conservative": None, "neutral": None,
-                "neutral_raw": None, "liquidation": None, "fair_value_ceiling": None,
+                "neutral_raw": None, "conservative_raw": None, "liquidation_raw": None,
+                "liquidation": None, "fair_value_ceiling": None,
                 "pe_median_5y": None, "current_eps": None, "pe_anchor_value": None,
                 "da_available": da_available, "capex_estimated": bool(capex_estimated_years),
                 "bucket": bucket,
@@ -277,11 +282,13 @@ def dcf_valuation(
     liquidation_fcf_values = {}
     for year in years:
         fcf = fcf_values.get(year, 0)
-        if da_available:
-            liquidation_fcf_values[year] = fcf - da_values.get(year, 0)
+        # D&A 可得且该年有值 → FCF − D&A；否则按 FCF×0.5 估算清算口径（与全局
+        # 无 D&A 分支一致，避免缺 D&A 的年份走 fcf−0=fcf 使清算基期虚高）。
+        if da_available and year in da_values:
+            liquidation_fcf_values[year] = fcf - da_values[year]
         else:
             liquidation_fcf_values[year] = fcf * 0.5
-    all_liq = [v for v in liquidation_fcf_values.values() if v is not None]
+    all_liq = list(liquidation_fcf_values.values())
     if all_liq:
         w_liq = np.linspace(0.5, 1.0, len(all_liq))
         base_fcf_liquidation = float(np.average(all_liq, weights=w_liq))
@@ -298,7 +305,8 @@ def dcf_valuation(
         print("\n  [X] 无法获取总股本（行业信息 / 日频 / 财务摘要均缺失），跳过 DCF 估值。")
         return {"valuations": None, "base_fcf": base_fcf, "base_fcf_liquidation": base_fcf_liquidation,
                 "total_shares": None, "conservative": None, "neutral": None,
-                "neutral_raw": None, "liquidation": None, "fair_value_ceiling": None,
+                "neutral_raw": None, "conservative_raw": None, "liquidation_raw": None,
+                "liquidation": None, "fair_value_ceiling": None,
                 "pe_median_5y": None, "current_eps": None, "pe_anchor_value": None,
                 "da_available": da_available, "capex_estimated": bool(capex_estimated_years),
                 "bucket": bucket,
@@ -370,6 +378,13 @@ def dcf_valuation(
     neutral_raw  = valuations["中性 (Neutral)"]["intrinsic_value"]
     liquidation  = valuations["破产清算 (Liquidation)"]["intrinsic_value"]
 
+    # 透明度（与 neutral_raw 同义）：捕获「市场 PE 锚定钳位之前」的 DCF 原始值。
+    # 下方 fair_value_ceiling < conservative 时 conservative/liquidation 会被钳到
+    # 天花板（保证 _judge_price 阶梯 liq≤c≤ceiling，不把建议分档搞反），此处保留
+    # DCF 原值供查阅，避免低 PE 股（银行/周期）的 DCF 信息被天花板抹去。
+    conservative_raw = conservative
+    liquidation_raw  = liquidation
+
     # item A4 兜底：某情景因 wacc≤永续被跳过（intrinsic_value=None）时，
     # 给下游一个安全的非空值，避免 investment_advice 直接索引 None 而崩溃。
     # 零增长 0 永续口径下保守情景不会触发，此处仅作 None→0 安全网。
@@ -396,7 +411,7 @@ def dcf_valuation(
         if net_profit_values and total_shares:
             np_sorted = sorted(net_profit_values.items())  # [(year, val)]
             if eps_method == "shiller":
-                recent = np_sorted[-10:]   # 周期股：≤10 年净利均值平滑峰谷
+                recent = np_sorted[-10:]   # 周期股：≤10 年净利均值平滑峰谷（窗口 = min(10, 可用年数)；当前财务窗 5 年 → 实取 5 年）
             else:
                 recent = np_sorted[-5:]    # normalized：近 5 年均值
             mean_np = float(np.mean([v for _, v in recent]))
@@ -445,8 +460,11 @@ def dcf_valuation(
         "base_fcf_liquidation": base_fcf_liquidation,
         "total_shares": total_shares,
         "conservative": conservative,
-        "neutral": fair_value_ceiling,        # 封顶后（下游 scoring/advice 零改动读取）
-        "neutral_raw": neutral_raw,           # 原始中性 DCF（透明度）
+        "neutral": fair_value_ceiling,        # 合理估值上限（=min(中性DCF, PE锚定)；
+                                              # 下游 scoring/advice 当作「公允价值」读取，非原始 DCF）
+        "neutral_raw": neutral_raw,           # 原始中性 DCF（未被 PE 锚定封顶，透明度）
+        "conservative_raw": conservative_raw, # 原始保守 DCF（未被市场天花板钳位，透明度）
+        "liquidation_raw": liquidation_raw,   # 原始破产清算 DCF（未被市场天花板钳位，透明度）
         "liquidation": liquidation,
         "fair_value_ceiling": fair_value_ceiling,
         "pe_median_5y": pe_median_5y,
@@ -526,7 +544,9 @@ def _get_total_shares(symbol: str, fin_abstract: pd.DataFrame,
 
     # 2. 从日频数据获取
     if daily_df is not None and not daily_df.empty:
-        for col in ["outstanding_share", "总股本", "total_share", "total_shares"]:
+        # outstanding_share 在新浪口径常指流通股本（≠总股本），对含限售股的标的会
+        # 低估总股本 → 高估每股价值；故总股本优先用明确命名列，outstanding 仅末位兜底。
+        for col in ["总股本", "total_share", "total_shares", "outstanding_share"]:
             if col in daily_df.columns:
                 val = pd.to_numeric(daily_df[col], errors="coerce").dropna()
                 if len(val) > 0:
@@ -540,9 +560,9 @@ def _get_total_shares(symbol: str, fin_abstract: pd.DataFrame,
             if len(val) > 0:
                 total = float(val.iloc[-1])
                 if total > 0:
-                    # 单位转换：若数值 < 10万（即 < 10e4），可能是万股
-                    if total < 1e4:
-                        total *= 1e4
+                    # 总股本单位约定为「股」（与 industry_info EM f84 / 日频口径一致）。
+                    # 不再按量级猜「万股」转换——无法可靠区分 19755（股）与 19755（万股），
+                    # 静默 ×1e4 会使 ≥1 亿股标的（万口径下 ≥1e4）被漏转、EPS 失真 1e4 倍。
                     return total
 
     # 3. 从财务摘要获取

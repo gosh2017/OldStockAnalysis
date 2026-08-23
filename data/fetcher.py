@@ -124,9 +124,10 @@ def _normalize_daily_df(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _total_shares_from_daily(daily_df: pd.DataFrame) -> float | None:
-    """从日频数据的 outstanding_share 列获取总股本。
-    新浪接口返回的 daily 数据含此字段，优先使用。"""
-    for col in ["outstanding_share", "总股本", "total_share", "total_shares"]:
+    """从日频数据的总股本列获取总股本。
+    优先明确命名的总股本列；outstanding_share（新浪口径常为流通股本）仅末位兜底，
+    避免对含限售股的标的低估总股本。"""
+    for col in ["总股本", "total_share", "total_shares", "outstanding_share"]:
         if col in daily_df.columns:
             val = pd.to_numeric(daily_df[col], errors="coerce").dropna()
             if len(val) > 0:
