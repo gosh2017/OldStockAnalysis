@@ -35,6 +35,15 @@ def investment_advice(
     latest_price = float(daily_df["收盘"].iloc[-1])
     latest_date  = daily_df["日期"].iloc[-1]
 
+    # 价格缺失/为 0（停牌、退市）或 NaN 时，分位比较与安全边际均无意义，
+    # 直接按「数据不足」返回，避免 margin_c 除零及 price<liq 比较误落档位。
+    if not latest_price or pd.isna(latest_price):
+        print("  [X] 当前股价缺失或为 0，无法给出建议。")
+        return {"recommendation": "数据不足", "latest_price": None,
+                "liquidation": None, "conservative": None, "neutral": None,
+                "fair_value_ceiling": None,
+                "sentiment": None, "screened": False}
+
     liquidation  = valuations["破产清算 (Liquidation)"]["intrinsic_value"]
     conservative = valuations["保守 (Conservative)"]["intrinsic_value"]
     ceiling      = dcf_result.get("fair_value_ceiling") or valuations["中性 (Neutral)"]["intrinsic_value"]
@@ -57,7 +66,7 @@ def investment_advice(
     percentile = sentiment_result.get("percentile", 50)
     print(f"\n  [DATA] 市场情绪: {sentiment}（{percentile:.0f}% 分位数）")
 
-    final_action, final_emoji = _adjust_for_sentiment(action, sentiment)
+    final_action, final_emoji = _adjust_for_sentiment(action, sentiment, emoji)
 
     # -- 基本面 --
     screened = screening_result.get("screened", False)
@@ -105,8 +114,12 @@ def _judge_price(price: float, liq: float, c: float, ceiling: float,
         )
 
 
-def _adjust_for_sentiment(action: str, sentiment: str) -> tuple:
-    """根据市场情绪微调最终操作建议。"""
+def _adjust_for_sentiment(action: str, sentiment: str, emoji: str) -> tuple:
+    """根据市场情绪微调最终操作建议。
+
+    未匹配的情绪（如「合理」「未知」或低估+持有或减仓等冲突组合）沿用价格档位
+    的 emoji，避免情绪兜底分支把 _judge_price 已分配的颜色丢成空串。
+    """
     if sentiment in ("极度低估", "低估") and action in ("大幅买入", "极度低估"):
         return action, "[GRN]"
     if sentiment in ("极度低估", "低估") and action == "分批建仓":
@@ -115,4 +128,4 @@ def _adjust_for_sentiment(action: str, sentiment: str) -> tuple:
         return "谨慎建仓", "[ORG]"
     if sentiment in ("高估", "极度高估") and action == "持有或减仓":
         return "建议减仓", "[RED]"
-    return action, ""
+    return action, emoji
