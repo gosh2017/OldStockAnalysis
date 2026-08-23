@@ -124,6 +124,7 @@ def dcf_valuation(
     non_annual_years = set()   # item C3：仅季报的年份（两表去重汇总，透明标注）
 
     if fin_abstract is not None and not fin_abstract.empty:
+        fin_abstract = fin_abstract.copy()  # item B1：隔离入参，避免原地 to_datetime/新增"年份"列污染调用方
         date_col = find_col_in(["报告日期", "报告期", "report"], fin_abstract)
         ocf_col  = find_col_in(["经营活动产生的现金流量净额", "经营活动现金"], fin_abstract)
         np_col   = find_col_in(["归属于上市公司股东的净利润", "归母净利润", "净利润"], fin_abstract)
@@ -137,7 +138,7 @@ def dcf_valuation(
                     row, is_annual = pick_annual_row(year_data, date_col)
                     if row is None:
                         row = year_data.sort_values(date_col).iloc[-1]
-                        is_annual = True
+                        is_annual = False  # 频率未知，按非年报标注（预解析后此分支实为死路径）
                     if not is_annual:
                         non_annual_years.add(year)
                     if ocf_col:
@@ -156,6 +157,7 @@ def dcf_valuation(
     da_values = {}
 
     if cashflow_df is not None and not cashflow_df.empty:
+        cashflow_df = cashflow_df.copy()  # item B1：隔离入参，避免原地 to_datetime/新增"年份"列污染调用方
         date_col_cf = find_col_in(["报告期", "报告日期", "report"], cashflow_df)
         capex_col   = find_col_in(["购建固定资产", "资本性支出", "购建长期资产"], cashflow_df)
         # D&A：优先合并列；否则分别取折旧 + 摊销求和（兼容 sina 分列）
@@ -173,7 +175,7 @@ def dcf_valuation(
                     row, is_annual = pick_annual_row(year_data, date_col_cf)
                     if row is None:
                         row = year_data.sort_values(date_col_cf).iloc[-1]
-                        is_annual = True
+                        is_annual = False  # 频率未知，按非年报标注（预解析后此分支实为死路径）
                     if not is_annual:
                         non_annual_years.add(year)
                     if capex_col:

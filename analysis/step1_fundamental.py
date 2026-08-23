@@ -49,6 +49,9 @@ def fundamental_screening(
         print("  [X] 财务数据不可用，跳过基本面分析。")
         return {"screened": False, "table": None, "roe_pass": False, "div_pass": False}
 
+    # item A3：隔离入参，避免下方 to_datetime / 新增"年份"列原地污染调用方 DataFrame
+    fin_abstract = fin_abstract.copy()
+
     # -- 识别关键列名 --
     date_col   = find_col_in(["报告日期", "报告期", "report"], fin_abstract)
     roe_col    = find_col_in(["加权净资产收益率", "ROE", "净资产收益率"], fin_abstract)
@@ -88,8 +91,9 @@ def fundamental_screening(
         row, is_annual = pick_annual_row(year_data, date_col)
         if row is None:
             # date_col 无法解析该行日期时回退旧逻辑，避免取数中断
+            # 频率未知，按非年报标注（line 62 预解析后此分支实为死路径，仅兜底）
             row = year_data.sort_values(date_col).iloc[-1]
-            is_annual = True
+            is_annual = False
         report_type = "年报" if is_annual else "季报*"
         if not is_annual:
             print(f"  [!] {year} 年仅季报，数据待年报")
@@ -102,7 +106,10 @@ def fundamental_screening(
             try:
                 ocf_val = float(row[ocf_col])
                 np_val = float(row[np_col])
-                if np_val != 0:
+                # item A6：仅盈利年算比率。亏损年（np≤0）置 None，避免 OCF 正/净利润负
+                # 算出负比率反向惩罚良好现金质量；scoring 的 ocf_quality 取中位数时
+                # dropna 排除 None，口径更准（不再被亏损年负值扭曲）。
+                if np_val > 0:
                     ocf_ratio = ocf_val / np_val
             except (ValueError, TypeError):
                 pass
@@ -117,19 +124,21 @@ def fundamental_screening(
             "ROE(%)": round(roe_val, 2) if roe_val is not None else None,
             "资产负债率(%)": round(debt_val, 2) if debt_val is not None else None,
             "经营现金流/净利润": round(ocf_ratio, 2) if ocf_ratio is not None else None,
-            "股息率(%)": round(div_yield, 2) if div_yield else None,
+            # item A1：用 is not None 而非真值判断——0.0 是合法股息率，不应被当缺失吞掉
+            "股息率(%)": round(div_yield, 2) if div_yield is not None else None,
             "分红来源": div_source,
             "报告期类型": report_type,
         })
 
     # -- 打印结果 --
     result_df = pd.DataFrame(results)
-    print(f"\n  [DATA] {symbol} 过去 {FIN_END - FIN_START + 1} 年核心财务指标\n")
+    print(f"\n  [DATA] {symbol} 过去 {len(years)} 年核心财务指标\n")
     print(result_df.to_string(index=False))
 
     # -- 判断是否通过筛选 --
     roe_series = result_df["ROE(%)"].dropna()
-    div_series = result_df["股息率(%)"].dropna()
+    # item A1：missing 年股息率存 0.0，按"分红来源"显式排除无数据年，不污染中位数/覆盖计数
+    div_series = result_df.loc[result_df["分红来源"] != "missing", "股息率(%)"].dropna()
 
     # 中位数口径：允许个别异常年，避免"全部达标"误杀稳健蓝筹。
     # 三条件：覆盖年数 ≥ MIN_COVERAGE_YEARS、中位数 > 阈值、达标年数 ≥ MIN_PASSING_YEARS。
@@ -171,11 +180,16 @@ def fundamental_screening(
 
 
 def _safe_pct(row, col: str | None) -> float | None:
-    """安全读取百分比值，若 > 100 则除以 100。"""
+    """安全读取百分比值。
+
+    AkShare 财务摘要按 0-100 尺度返回百分比（如 ROE 12.31 表 12.31%），直接用即可。
+    历史「>100 则除以 100」守卫会把资不抵债的资产负债率（>100%）或超高 ROE
+    压成 ~1，故移除。debt 权重为 0（见 config.SCORE_QUALITY_W），影响仅展示，
+    但口径更诚实。
+    """
     if not col:
         return None
     try:
-        val = float(row[col])
-        return val / 100 if val > 100 else val
+        return float(row[col])
     except (ValueError, TypeError):
         return None

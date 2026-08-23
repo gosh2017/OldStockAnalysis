@@ -319,9 +319,9 @@ def estimate_dividend_yield(
     # 方案 2：ROE x 行业分红率近似（item C2：去硬编码 0.30）
     try:
         if roe_col and equity_col:
+            # AkShare ROE 按 0-100 尺度返回，直接用（与 step1._safe_pct 口径统一，
+            # 不再 >100 除以 100——避免超高 ROE 被压成小数）
             roe_val = float(row[roe_col])
-            if roe_val > 100:
-                roe_val = roe_val / 100
             return roe_val * payout_ratio / 100 * 100, "estimated_roe"
     except Exception:
         pass
