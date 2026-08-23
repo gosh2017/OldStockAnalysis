@@ -3,9 +3,10 @@
 历史回测验证模块（提示词 D）— 信号有效性的历史验证。
 
 回测是现有分析层的**消费者**：以"数据注入 + 静默"方式复用 step1–4 / scoring，
-**不改其内部任何一行**。三个层次：
+**不改其内部任何一行**。四个层次：
   - analyze_as_of ：时点分析适配器（D2）——接收截断 bundle，调现有四步+评分，静默。
   - run_backtest  ：回测引擎（D3）——调仓/选股/持有/换仓成本/退市兜底 + 日频净值。
+  - compute_grade_signal：等级信号有效性判定（D3b）——bootstrap CI + 单调性 + 3 态判定。
   - compute_metrics：业绩度量（D4）——纯 numpy，总收益/CAGR/波动/回撤/Sharpe/胜率/Alpha/Beta。
 
 诚实限定（详见 README / CHANGELOG）：
@@ -26,8 +27,10 @@ import pandas as pd
 from config import (
     StockContext, START_DATE, END_DATE,
     BACKTEST_PUB_LAG_DAYS, BACKTEST_TXN_COST,
+    BACKTEST_MIN_SAMPLE, BACKTEST_BOOTSTRAP_ITERS,
+    BACKTEST_BOOTSTRAP_SEED, BACKTEST_CI_LEVEL,
 )
-from utils import find_col_in
+from utils import find_col_in, bootstrap_ci
 from data import as_of_bundle, generate_all_demo_data, generate_benchmark_daily
 from analysis import (
     fundamental_screening,
@@ -162,6 +165,8 @@ class BacktestResult:
     trades: list = field(default_factory=list)      # 换仓明细
     benchmark_curve: pd.Series = None               # 基准净值（同日历归一）
     grade_forward_returns: dict = field(default_factory=dict)  # 等级→前向收益序列
+    grade_returns_panel: list = field(default_factory=list)  # [{date,grade,return,delisted}] 保日期配对
+    grade_signal: dict = field(default_factory=dict)         # 等级信号有效性判定（供 UI/图表）
     metrics: dict = field(default_factory=dict)
     rebalance_dates: list = field(default_factory=list)
 
@@ -186,12 +191,18 @@ def _rebalance_dates(freq: str, start, end) -> list:
 
 
 def _forward_return(full_daily, buy_date, hold_days, next_date, end) -> tuple[float | None, bool]:
-    """用未截断全量日线计算 buy_date→sell 的真实前向收益。
+    """用未截断全量日线计算 buy_date→sell 的真实前向收益（退市按末值强制清仓）。
 
     buy 价 = buy_date 当日（或之前最近交易日）收盘；sell 价：
-      - hold_days 给定：buy 之后第 hold_days 个交易日收盘（index 对齐，可交易日不足夹到末值）；
-      - hold_days=None：next_date（下一调仓日）之前最近交易日收盘；无 next_date 用 end。
-    返回 (forward_return, delisted)：退市/停牌/无可交易日对齐时收益记 0、delisted=True。
+      - hold_days 给定：buy 之后第 hold_days 个交易日收盘；若越过末交易日（退市/
+        数据耗尽）→ 按末值清仓、delisted=True；
+      - hold_days=None：next_date（下一调仓日）之前最近交易日收盘；数据在 next_date
+        之前耗尽（退市）→ 按末值清仓、delisted=True；无 next_date 用 end。
+
+    delisted=True 表示"持有期内数据耗尽，按末值强制清仓兑现"——已捕捉退市下跌到
+    末值（买在末日记 0）。**末期（next_date=None）回测终点数据天然止于 end，无法
+    区分退市与回测结束，故末期不判 delisted（保守不报）。** 买在末日/无可对齐交易
+    日 → 收益记 0、delisted=True。
     """
     if full_daily is None or not isinstance(full_daily, pd.DataFrame) or full_daily.empty:
         return None, True
@@ -199,21 +210,30 @@ def _forward_return(full_daily, buy_date, hold_days, next_date, end) -> tuple[fl
     buy_mask = d["日期"] <= pd.Timestamp(buy_date)
     if not buy_mask.any():
         return None, True
-    # buy 价 = buy_date 当日（或之前最近交易日）收盘 → 取最后一个 <= buy_date 的行
     bi = int(np.where(buy_mask.values)[0][-1])
+    last_idx = len(d) - 1
+    last_data_date = d["日期"].iloc[last_idx]
+    is_last = next_date is None  # 末期：回测终点，数据天然止于 end，不判退市
 
+    delisted = False
     if hold_days is not None:
-        si = min(bi + int(hold_days), len(d) - 1)
+        intended = bi + int(hold_days)
+        if intended > last_idx:
+            si = last_idx
+            delisted = not is_last   # 末期不报（无法与回测结束区分）
+        else:
+            si = intended
     else:
         sell_target = pd.Timestamp(next_date) if next_date is not None else pd.Timestamp(end)
-        sell_mask = d["日期"] <= sell_target
-        if sell_mask.any():
-            si = int(np.where(sell_mask.values)[0][-1])
+        if (not is_last) and (last_data_date < sell_target):
+            si = last_idx
+            delisted = True          # 数据在目标卖出日之前耗尽 → 按末值清仓
         else:
-            si = len(d) - 1
+            sell_mask = d["日期"] <= sell_target
+            si = int(np.where(sell_mask.values)[0][-1]) if sell_mask.any() else last_idx
 
     if si <= bi:
-        # 无前向可交易日（buy 即末日或退市）→ 0 收益，标记退市
+        # 无前向可交易日（buy 即末日/退市）→ 按买价清仓，0 收益
         return 0.0, True
     try:
         p_buy = float(d["收盘"].iloc[bi])
@@ -222,7 +242,7 @@ def _forward_return(full_daily, buy_date, hold_days, next_date, end) -> tuple[fl
         return 0.0, True
     if p_buy <= 0:
         return 0.0, True
-    return p_sell / p_buy - 1.0, False
+    return p_sell / p_buy - 1.0, delisted
 
 
 def _prefetch_live(symbols, end) -> tuple[dict, dict]:
@@ -301,6 +321,11 @@ def _build_equity_curve(periods, rets_df: pd.DataFrame, calendar: pd.DatetimeInd
     日期 d 的组合收益 = Σ(持有权重 × 个股当日收益)；持有权重 = 最近一次 < d 的调仓设定。
     换仓日（d == t_start）在计提当日收益后扣双边成本（buy_amt+sell_amt，各 txn_cost）。
     返回 (日频净值 Series, 调仓间期收益 Series 用于胜率)。
+
+    口径注：净值曲线恒按"下一调仓日切换权重"，与 hold_days 无关；hold_days 仅用于
+    _forward_return 算等级前向收益（grade_forward_returns / panel）。故 hold_days=None
+    （默认）时两者卖出点一致（均下一调仓日收盘）；hold_days≠None 时前向收益按固定交易日
+    卖、净值仍按调仓日切——两者口径分歧，属已知简化（默认路径不受影响）。
     """
     if len(calendar) == 0 or not periods:
         return pd.Series(dtype=float), pd.Series(dtype=float)
@@ -412,6 +437,17 @@ def run_backtest(symbols, *, start, end, freq="Q", hold_days=None,
             d_eff = td_idx[pos]
             if d_eff not in rebal_eff:  # 去重（同交易日的多调仓日合并）
                 rebal_eff.append(d_eff)
+
+    # 把 start 补为首个调仓日（首个 >= start 的交易日），用满整段窗口——
+    # 避免 freq=Y 且 start=年初时首个调仓日要等到年末、回测实际晚近近一年。
+    # start 本身是末日（如 12-31）时 pad 已覆盖首日，backfill 结果 >= 首个末日，
+    # 不前插，避免把"年末非交易日"前移到次年。
+    if len(td_idx):
+        s_pos = td_idx.get_indexer([pd.Timestamp(start)], method="backfill")[0]
+        if 0 <= s_pos < len(td_idx):
+            s_eff = td_idx[s_pos]
+            if not rebal_eff or s_eff < rebal_eff[0]:
+                rebal_eff.insert(0, s_eff)
     if not rebal_eff:
         return BacktestResult(equity_curve=pd.Series(dtype=float),
                               grade_forward_returns={"A": [], "B": [], "C": [], "D": []},
@@ -419,6 +455,7 @@ def run_backtest(symbols, *, start, end, freq="Q", hold_days=None,
 
     # -- 3. 逐调仓日分析 + 等级前向收益 --
     grade_fwd = {"A": [], "B": [], "C": [], "D": []}
+    grade_panel = []  # [{date, grade, return, delisted}] 保日期配对（供 bootstrap）
     min_rank = _GRADE_RANK.get(str(min_grade).upper(), 0)
     per_rebal = []  # [{date, results, selected, weights}]
 
@@ -426,21 +463,32 @@ def run_backtest(symbols, *, start, end, freq="Q", hold_days=None,
         next_T = rebal_eff[i + 1] if i + 1 < len(rebal_eff) else None
         T_str = pd.Timestamp(T).strftime("%Y%m%d")
         results = {}
+        fr_cache = {}  # sym -> (fr, delisted)，供 positions 复用，不重算
         for sym, name in symbols:
+            d_full = full_daily_by_sym.get(sym)
+            # 退市排除：末交易日 < T 的标的在 T 买不到，不进分析/选股/信号收益
+            if d_full is None or d_full.empty:
+                continue
+            if pd.Timestamp(d_full["日期"].max()) < pd.Timestamp(T):
+                continue
             bundle = as_of_bundle(sym, T, caches[sym], demo=demo,
                                   pub_lag_days=BACKTEST_PUB_LAG_DAYS)
             sym_ctx = StockContext(symbol=sym, name=name, demo=demo, no_chart=True,
                                    start_date=START_DATE, end_date=T_str)
             res = analyze_as_of(sym_ctx, bundle)
             results[sym] = res
-            # 全部标的（不限入选）按等级分桶，记 hold 期前向收益
-            fr, _dl = _forward_return(full_daily_by_sym.get(sym), T, hold_days, next_T, end_dt)
+            # 全部存活标的（不限入选）按等级分桶，记 hold 期前向收益
+            fr, dl = _forward_return(d_full, T, hold_days, next_T, end_dt)
+            fr_cache[sym] = (fr, dl)
             if fr is not None:
                 grade_fwd.setdefault(res["grade"], []).append(fr)
+                grade_panel.append({"date": pd.Timestamp(T), "grade": res["grade"],
+                                    "return": fr, "delisted": dl})
 
-        # 选股：grade >= min_grade 且 score 降序 top_n
+        # 选股：grade >= min_grade 且 score 降序 top_n（仅存活标的）
         cands = [(sym, results[sym]) for sym in universe
-                 if _GRADE_RANK.get(results[sym]["grade"], 0) >= min_rank]
+                 if sym in results
+                 and _GRADE_RANK.get(results[sym]["grade"], 0) >= min_rank]
         cands.sort(key=lambda x: x[1]["score"], reverse=True)
         selected = cands[:top_n]
 
@@ -457,7 +505,7 @@ def run_backtest(symbols, *, start, end, freq="Q", hold_days=None,
 
         per_rebal.append({"date": T, "next_date": next_T, "results": results,
                           "selected": [s for s, _ in selected], "weights": weights,
-                          "hold_days": hold_days})
+                          "hold_days": hold_days, "fr_cache": fr_cache})
 
     # -- 4. 日频净值曲线 --
     # 持有期：periods[i] = (t_start, t_end, weights)；t_end = 下一调仓日 or end_dt
@@ -490,8 +538,7 @@ def run_backtest(symbols, *, start, end, freq="Q", hold_days=None,
     for i, pr in enumerate(per_rebal):
         holdings = []
         for sym in pr["selected"]:
-            fr, dl = _forward_return(full_daily_by_sym.get(sym), pr["date"],
-                                      pr["hold_days"], pr["next_date"], end_dt)
+            fr, dl = pr.get("fr_cache", {}).get(sym, (None, True))
             holdings.append({
                 "symbol": sym,
                 "grade": pr["results"][sym]["grade"],
@@ -514,27 +561,43 @@ def run_backtest(symbols, *, start, end, freq="Q", hold_days=None,
         positions.append({"date": pr["date"], "holdings": holdings,
                           "portfolio_return": port_ret})
 
+    def _close_at(sym, date):
+        """取 sym 在 date（或之前最近交易日）的收盘价，供 trades 记录成交价。"""
+        d = full_daily_by_sym.get(sym)
+        if d is None or d.empty:
+            return None
+        sub = d[d["日期"] <= pd.Timestamp(date)]
+        if sub.empty:
+            return None
+        try:
+            return float(sub["收盘"].iloc[-1])
+        except Exception:
+            return None
+
     trades = []
     prev_sel = set()
     for pr in per_rebal:
         cur_sel = set(pr["selected"])
         for sym in cur_sel - prev_sel:
             trades.append({"date": pr["date"], "symbol": sym, "action": "buy",
-                           "weight": pr["weights"].get(sym, 0.0)})
+                           "weight": pr["weights"].get(sym, 0.0),
+                           "price": _close_at(sym, pr["date"])})
         for sym in prev_sel - cur_sel:
-            trades.append({"date": pr["date"], "symbol": sym, "action": "sell", "weight": 0.0})
+            trades.append({"date": pr["date"], "symbol": sym, "action": "sell",
+                           "weight": 0.0, "price": _close_at(sym, pr["date"])})
         prev_sel = cur_sel
 
     # -- 7. 度量 --
     risk_free = None
-    # 取国债历史末值年化（市场级，共享）；demo/live 均从任一 cache 取（市场口径一致）
+    # 取国债历史区间均值年化（市场级，共享）；demo/live 均从任一 cache 取（市场口径一致）。
+    # 用区间均值而非末值——Sharpe 扣减全程应用一个利率，均值更贴近全程真实无风险水平。
     for sym in universe:
         bh = caches[sym].get("bond_yield_history")
         if bh is not None and not bh.empty:
             try:
                 by = pd.to_numeric(bh["国债收益率"], errors="coerce").dropna()
                 if len(by) > 0:
-                    risk_free = float(by.iloc[-1])
+                    risk_free = float(by.mean())
                     break
             except Exception:
                 pass
@@ -542,15 +605,115 @@ def run_backtest(symbols, *, start, end, freq="Q", hold_days=None,
     metrics = compute_metrics(equity_curve, benchmark_curve, risk_free,
                              period_returns=period_returns)
 
+    grade_signal = compute_grade_signal(grade_panel)
+
     return BacktestResult(
         equity_curve=equity_curve,
         positions=positions,
         trades=trades,
         benchmark_curve=benchmark_curve,
         grade_forward_returns=grade_fwd,
+        grade_returns_panel=grade_panel,
+        grade_signal=grade_signal,
         metrics=metrics,
         rebalance_dates=list(rebal_eff),
     )
+
+
+# =====================================================================
+# D3b — 等级信号有效性判定（bootstrap CI + 单调性 + 3 态）
+# =====================================================================
+def compute_grade_signal(panel, *, min_sample: int = BACKTEST_MIN_SAMPLE,
+                         n_iter: int = BACKTEST_BOOTSTRAP_ITERS,
+                         ci_level: float = BACKTEST_CI_LEVEL,
+                         seed: int = BACKTEST_BOOTSTRAP_SEED) -> dict:
+    """从 grade_returns_panel 算各等级 n/均值/bootstrap CI + 单调性 + best-worst 差 CI，
+    出 3 态判定：有效 / 待定 / 无效（样本不足另列）。
+
+    诚实口径：
+      - best=有样本的最高级、worst=有样本的最低级（沿用既有 best/worst 语义）。
+      - 单调性：连续有样本等级的均值非递增（允许中间缺级跳过）。
+      - best-worst 差 CI：优先按调仓日**配对**重抽样（每日 best 均值−worst 均值得
+        diff_d，对 diff_d 序列 bootstrap）——配对能控制当日市场环境，比独立
+        resample 更稳健；无配对日则退化到各级 CI 不重叠判定（更保守）。
+      - 判定：best/worst 任一 n < min_sample → "样本不足"；
+              单调且 gap_ci_lo > 0 → "有效"；gap_ci_hi < 0 → "无效"（高等级显著
+              跑输）；其余（CI 跨 0 或单调性破缺但未显著反转）→ "待定"。
+
+    返回 {verdict, best, worst, n_by_grade, mean_by_grade, ci_by_grade,
+          gap_ci_lo, gap_ci_hi, gap_point, monotonic, ci_level, min_sample}。
+    """
+    grades = ["A", "B", "C", "D"]
+    by_grade = {g: [] for g in grades}
+    by_date = {}  # date -> {grade: [returns]}，用于配对
+    for row in panel:
+        g, r, d = row.get("grade"), row.get("return"), row.get("date")
+        if g in by_grade and r is not None:
+            by_grade[g].append(float(r))
+            by_date.setdefault(d, {}).setdefault(g, []).append(float(r))
+
+    n_by = {g: len(by_grade[g]) for g in grades}
+    mean_by = {g: (sum(by_grade[g]) / len(by_grade[g]) if by_grade[g] else None)
+               for g in grades}
+    ci_by = {}
+    for g in grades:
+        lo, hi, _ = bootstrap_ci(by_grade[g], n_iter=n_iter, ci=ci_level, seed=seed)
+        ci_by[g] = (lo, hi)
+
+    present = [g for g in grades if n_by[g] > 0]
+    best = present[0] if present else None
+    worst = present[-1] if present else None
+
+    # 单调性：present 序列均值非递增
+    monotonic = True
+    for a, b in zip(present, present[1:]):
+        if mean_by[a] < mean_by[b]:
+            monotonic = False
+            break
+
+    # best-worst 差的配对 bootstrap（无配对日则置 None，判定时退化到 CI 不重叠）
+    gap_lo = gap_hi = gap_point = None
+    if best and worst and best != worst and mean_by[best] is not None \
+            and mean_by[worst] is not None:
+        gap_point = float(mean_by[best] - mean_by[worst])
+        diffs = []
+        for _d, gm in by_date.items():
+            if best in gm and worst in gm:
+                diffs.append(sum(gm[best]) / len(gm[best])
+                             - sum(gm[worst]) / len(gm[worst]))
+        if len(diffs) >= 2:
+            gap_lo, gap_hi, _ = bootstrap_ci(diffs, n_iter=n_iter,
+                                             ci=ci_level, seed=seed)
+
+    # 判定
+    verdict = "待定"
+    if not best or not worst or best == worst \
+            or n_by[best] < min_sample or n_by[worst] < min_sample:
+        verdict = "样本不足"
+    elif gap_lo is not None and gap_hi is not None:
+        if monotonic and gap_lo > 0:
+            verdict = "有效"
+        elif gap_hi < 0:
+            verdict = "无效"
+        else:
+            verdict = "待定"
+    else:
+        # 无配对日：退化到各级 CI 不重叠判定（更保守）
+        b_lo, b_hi = ci_by[best]
+        w_lo, w_hi = ci_by[worst]
+        if b_lo is not None and w_hi is not None and monotonic and b_lo > w_hi:
+            verdict = "有效"
+        elif b_hi is not None and w_lo is not None and b_hi < w_lo:
+            verdict = "无效"
+        else:
+            verdict = "待定"
+
+    return {
+        "verdict": verdict, "best": best, "worst": worst,
+        "n_by_grade": n_by, "mean_by_grade": mean_by, "ci_by_grade": ci_by,
+        "gap_ci_lo": gap_lo, "gap_ci_hi": gap_hi, "gap_point": gap_point,
+        "monotonic": monotonic, "ci_level": ci_level, "min_sample": min_sample,
+    }
 
 
 # =====================================================================

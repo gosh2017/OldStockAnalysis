@@ -379,7 +379,7 @@ def _print_backtest_summary(result: BacktestResult, items, demo: bool) -> None:
         ("最大回撤",      _pct(m.get("max_drawdown"))),
         ("Sharpe 比率",   f"{m.get('sharpe'):.2f}" if m.get("sharpe") is not None else "N/A"),
         ("胜率",          _pct(m.get("win_rate"))),
-        ("Alpha（vs 基准）", _pct(m.get("alpha"))),
+        ("超额年化（vs 基准）", _pct(m.get("alpha"))),
         ("Beta（vs 基准）",  f"{m.get('beta'):.2f}" if m.get("beta") is not None else "N/A"),
         ("无风险利率",     _pct(m.get("risk_free"))),
         ("调仓期数",       str(len(result.rebalance_dates))),
@@ -396,36 +396,55 @@ def _print_backtest_summary(result: BacktestResult, items, demo: bool) -> None:
     # 各等级前向收益表
     sep("各等级前向收益（信号单调性验证）")
     gfr = result.grade_forward_returns or {}
+    gs = result.grade_signal or {}
+    ci_by = gs.get("ci_by_grade", {})
     grades = ["A", "B", "C", "D"]
     g_rows = []
-    means = {}
     for g in grades:
         seq = gfr.get(g, [])
         n = len(seq)
         mean = (sum(seq) / len(seq)) if seq else None
-        means[g] = mean
+        lo, hi = ci_by.get(g, (None, None))
+        ci_str = (f"[{lo * 100:+.2f}%, {hi * 100:+.2f}%]"
+                  if (lo is not None and hi is not None) else "—")
         g_rows.append({
             "等级": g,
             "样本数": n,
             "平均前向收益": f"{mean * 100:+.2f}%" if mean is not None else "—",
+            "95% CI": ci_str,
         })
     print(pd.DataFrame(g_rows).to_string(index=False))
 
-    # 结论：对比最高等级（有数据）vs 最低等级
-    best_g = next((g for g in grades if means.get(g) is not None), None)
-    worst_g = next((g for g in reversed(grades) if means.get(g) is not None), None)
+    # 结论：3 态判定（有效 / 待定 / 无效 / 样本不足），读 grade_signal
+    verdict = gs.get("verdict", "样本不足")
+    best_g = gs.get("best")
+    worst_g = gs.get("worst")
+    mean_by = gs.get("mean_by_grade", {})
+    n_by = gs.get("n_by_grade", {})
+    mono = gs.get("monotonic")
+    gap_lo = gs.get("gap_ci_lo")
+    gap_hi = gs.get("gap_ci_hi")
+    gap_pt = gs.get("gap_point")
+    mono_str = "是" if mono else "否"
     print()
-    if best_g and worst_g and best_g != worst_g:
-        bm, wm = means[best_g], means[worst_g]
-        valid = bm > wm
-        verdict = "有效" if valid else "无效"
-        print(f"  ★ {best_g} 级平均前向收益 {bm * 100:+.2f}% vs {worst_g} 级 {wm * 100:+.2f}%"
-              f" → 信号{verdict}（高等级{'跑赢' if valid else '未跑赢'}低等级）")
-    elif best_g:
-        print(f"  ★ 仅有 {best_g} 级样本（平均前向收益 {means[best_g] * 100:+.2f}%），"
-              f"无法做等级间对比，信号有效性待更多样本。")
+    if verdict == "有效" and best_g and worst_g:
+        print(f"  ★ 信号有效：{best_g} 级 {mean_by[best_g] * 100:+.2f}% vs {worst_g} 级 "
+              f"{mean_by[worst_g] * 100:+.2f}%（差 {gap_pt * 100:+.2f}%，95% CI "
+              f"[{gap_lo * 100:+.2f}%, {gap_hi * 100:+.2f}%]，单调性 {mono_str}）。")
+    elif verdict == "无效" and best_g and worst_g:
+        print(f"  ★ 信号无效：{best_g} 级 {mean_by[best_g] * 100:+.2f}% vs {worst_g} 级 "
+              f"{mean_by[worst_g] * 100:+.2f}%（差 {gap_pt * 100:+.2f}%，95% CI "
+              f"[{gap_lo * 100:+.2f}%, {gap_hi * 100:+.2f}%]，高等级显著跑输）。")
+    elif verdict == "待定" and best_g and worst_g:
+        ci_str = (f"差 {gap_pt * 100:+.2f}%，95% CI [{gap_lo * 100:+.2f}%, {gap_hi * 100:+.2f}%]"
+                  if gap_lo is not None else "无法估计差值 CI")
+        print(f"  ★ 信号待定：{best_g} 级 {mean_by[best_g] * 100:+.2f}% vs {worst_g} 级 "
+              f"{mean_by[worst_g] * 100:+.2f}%（{ci_str}，单调性 {mono_str}）。"
+              f"CI 跨 0 或单调性破缺，结论不显著。")
     else:
-        print("  ★ 无足够等级样本，信号有效性无法判定。")
+        nb = n_by.get(best_g, 0) if best_g else 0
+        print(f"  ★ 信号样本不足：最高级 {best_g or '—'} 仅 {nb} 个样本"
+              f"（需 ≥ {gs.get('min_sample')}），无法判定有效性。")
 
     # 诚实限定
     print("\n  [限定] 本回测为「准 PIT」口径（AkShare 财务可能重述）+ 幸存者偏差"

@@ -11,7 +11,7 @@ from .helpers import (
     generate_historical_erp,
     recent_value,
 )
-from .stats import percentile_of_score
+from .stats import percentile_of_score, bootstrap_ci
 from .cache import disk_cache, clear_cache
 
 __all__ = [
@@ -23,6 +23,7 @@ __all__ = [
     "generate_historical_erp",
     "recent_value",
     "percentile_of_score",
+    "bootstrap_ci",
     "disk_cache",
     "clear_cache",
 ]

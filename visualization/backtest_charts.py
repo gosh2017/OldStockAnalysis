@@ -132,9 +132,25 @@ def plot_grade_forward_returns(result, ctx) -> None:
         samples.append(len(seq))
         means.append(float(np.mean(seq)) * 100 if seq else 0.0)
 
+    # 误差棒：grade_signal 的 bootstrap CI 上下半宽（不对称，分数转百分），无则 0
+    gs = getattr(result, "grade_signal", None) or {}
+    ci_by = gs.get("ci_by_grade", {})
+    err_minus, err_plus = [], []
+    for g, m, n in zip(grades, means, samples):
+        lo, hi = ci_by.get(g, (None, None))
+        if lo is not None and hi is not None and n > 0:
+            err_minus.append(max(m - lo * 100, 0.0))
+            err_plus.append(max(hi * 100 - m, 0.0))
+        else:
+            err_minus.append(0.0)
+            err_plus.append(0.0)
+    yerr = [err_minus, err_plus]  # 2×N：[下偏, 上偏]
+
     fig, ax = plt.subplots(figsize=(8, 5.5))
     colors = ["#1a73e8", "#34a853", "#fbbc04", "#ea4335"]
-    bars = ax.bar(grades, means, color=colors, edgecolor="black", linewidth=0.5, width=0.6)
+    bars = ax.bar(grades, means, color=colors, edgecolor="black", linewidth=0.5,
+                  width=0.6, yerr=yerr, capsize=3,
+                  error_kw=dict(lw=1.2, ecolor="#555"))
     for bar, m, n in zip(bars, means, samples):
         label = f"{m:+.2f}%" if n > 0 else "无样本"
         ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height(),

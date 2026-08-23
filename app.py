@@ -335,17 +335,32 @@ def drawdown_figure(result):
 
 
 def grade_returns_figure(result):
-    """各等级平均前向收益柱状图（验证 A/B/C/D 单调性）。"""
+    """各等级平均前向收益柱状图（验证 A/B/C/D 单调性），带 bootstrap CI 误差棒。"""
     gfr = result.grade_forward_returns or {}
+    gs = result.grade_signal or {}
+    ci_by = gs.get("ci_by_grade", {})
     grades = ["A", "B", "C", "D"]
     means = [(sum(gfr.get(g, [])) / len(gfr.get(g, []))) * 100
              if gfr.get(g) else 0.0 for g in grades]
     samples = [len(gfr.get(g, [])) for g in grades]
+    # 误差棒：bootstrap CI 上下半宽（不对称，分数转百分），无 CI 置 0
+    err_plus, err_minus = [], []
+    for i, g in enumerate(grades):
+        m = means[i]  # 百分
+        lo, hi = ci_by.get(g, (None, None))
+        if lo is not None and hi is not None and samples[i] > 0:
+            err_plus.append(max(hi * 100 - m, 0.0))
+            err_minus.append(max(m - lo * 100, 0.0))
+        else:
+            err_plus.append(0.0)
+            err_minus.append(0.0)
     fig = go.Figure(go.Bar(
         x=grades, y=means,
         marker_color=[GRADE_COLOR[g] for g in grades],
         text=[f"{m:+.2f}%" if n > 0 else "无样本" for m, n in zip(means, samples)],
         textposition="outside", width=0.55,
+        error_y=dict(type="data", array=err_plus, arrayminus=err_minus,
+                     visible=True, color="#555", thickness=1.2),
         hovertemplate="等级 %{x}<br>平均前向收益 %{y:+.2f}%<extra></extra>",
     ))
     fig.add_hline(y=0, line_color="#000", line_width=0.8)
@@ -487,7 +502,7 @@ def render_backtest(result: BacktestResult):
     r2 = st.columns(4)
     r2[0].metric("Sharpe 比率", _num(m.get("sharpe")))
     r2[1].metric("胜率", _pct(m.get("win_rate")))
-    r2[2].metric("Alpha（vs 基准）", _pct(m.get("alpha")))
+    r2[2].metric("超额年化（vs 基准）", _pct(m.get("alpha")))
     r2[3].metric("Beta（vs 基准）", _num(m.get("beta")))
     st.caption(f"无风险利率：{_pct(m.get('risk_free'))}　·　调仓期数：{len(result.rebalance_dates)}")
 
@@ -506,27 +521,50 @@ def render_backtest(result: BacktestResult):
         st.plotly_chart(grade_returns_figure(result), use_container_width=True)
     with tcol:
         gfr = result.grade_forward_returns or {}
+        gs = result.grade_signal or {}
+        ci_by = gs.get("ci_by_grade", {})
         grades = ["A", "B", "C", "D"]
         rows = []
         for g in grades:
             seq = gfr.get(g, [])
-            rows.append({"等级": g, "样本数": len(seq),
-                         "平均前向收益": f"{(sum(seq) / len(seq)) * 100:+.2f}%" if seq else "—"})
+            lo, hi = ci_by.get(g, (None, None))
+            if seq:
+                mean = sum(seq) / len(seq)
+                ci_str = (f"[{lo * 100:+.2f}%, {hi * 100:+.2f}%]"
+                          if lo is not None and hi is not None else "—")
+                rows.append({"等级": g, "样本数": len(seq),
+                             "平均前向收益": f"{mean * 100:+.2f}%", "95% CI": ci_str})
+            else:
+                rows.append({"等级": g, "样本数": 0, "平均前向收益": "—", "95% CI": "—"})
         st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
-        means = {g: (sum(gfr.get(g, [])) / len(gfr.get(g, []))
-                    if gfr.get(g) else None) for g in grades}
-        best = next((g for g in grades if means[g] is not None), None)
-        worst = next((g for g in reversed(grades) if means[g] is not None), None)
-        if best and worst and best != worst:
-            valid = means[best] > means[worst]
-            verdict = "有效" if valid else "无效"
-            st.success(f"★ {best} 级 {means[best] * 100:+.2f}% vs {worst} 级 "
-                       f"{means[worst] * 100:+.2f}% → 信号{verdict}"
-                       f"（高等级{'跑赢' if valid else '未跑赢'}低等级）")
-        elif best:
-            st.info(f"仅有 {best} 级样本，无法做等级间对比，信号有效性待更多样本。")
+
+        verdict = gs.get("verdict", "样本不足")
+        best = gs.get("best")
+        worst = gs.get("worst")
+        mean_by = gs.get("mean_by_grade", {})
+        n_by = gs.get("n_by_grade", {})
+        mono = gs.get("monotonic")
+        gap_lo = gs.get("gap_ci_lo")
+        gap_hi = gs.get("gap_ci_hi")
+        gap_pt = gs.get("gap_point")
+        if verdict == "有效" and best and worst:
+            st.success(f"★ 信号**有效**：{best} 级 {mean_by[best] * 100:+.2f}% vs {worst} 级 "
+                       f"{mean_by[worst] * 100:+.2f}%（差 {gap_pt * 100:+.2f}%，95% CI "
+                       f"[{gap_lo * 100:+.2f}%, {gap_hi * 100:+.2f}%]，单调性 ✓）。")
+        elif verdict == "无效" and best and worst:
+            st.error(f"★ 信号**无效**：{best} 级 {mean_by[best] * 100:+.2f}% vs {worst} 级 "
+                     f"{mean_by[worst] * 100:+.2f}%（差 {gap_pt * 100:+.2f}%，95% CI "
+                     f"[{gap_lo * 100:+.2f}%, {gap_hi * 100:+.2f}%]，高等级显著跑输）。")
+        elif verdict == "待定" and best and worst:
+            ci_str = (f"差 {gap_pt * 100:+.2f}%，95% CI [{gap_lo * 100:+.2f}%, "
+                      f"{gap_hi * 100:+.2f}%]" if gap_lo is not None else "无法估计差值 CI")
+            st.warning(f"★ 信号**待定**：{best} 级 {mean_by[best] * 100:+.2f}% vs {worst} 级 "
+                       f"{mean_by[worst] * 100:+.2f}%（{ci_str}，单调性 "
+                       f"{'✓' if mono else '✗'}）。CI 跨 0 或单调性破缺，结论不显著。")
         else:
-            st.warning("无足够等级样本，信号有效性无法判定。")
+            nb = n_by.get(best, 0) if best else 0
+            st.warning(f"★ 信号**样本不足**：最高级 {best or '—'} 仅 {nb} 个样本"
+                       f"（需 ≥ {gs.get('min_sample')}），无法判定有效性。")
 
     st.markdown("#### 📋 持仓明细（逐调仓期）")
     pos_rows = []
