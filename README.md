@@ -197,7 +197,7 @@ Python 3.9+ · akshare · pandas · numpy · matplotlib · scipy（分位数，�
 - **历史回测（三段限定，非严格历史回测）**：
   - **准 PIT**：AkShare 财务/现金流接口返回全历史且常含**重述后**数据，并非严格时点可得。回测按"截止 as-of 日 T"显式截断所有输入序列（`truncate_to_date`），财报另按"报告期 + 披露滞后 120d"过滤（`filter_reports_by_pub_lag`），但无法消除重述偏差——仅为准 PIT 口径，不得宣称"严格历史可得"。
   - **幸存者偏差**：实盘回测标的清单来自当前在市标的（`fetch_stock_list` 即如此），已退市标的不在样本内，系统性高估策略表现。`--backtest-demo` 用模拟数据无此问题但非真实行情。
-  - **简化成本**：仅计双边交易费率（`BACKTEST_TXN_COST=0.001` 单边，换仓 round-trip 2×），未计滑点 / 印花税 / 停牌流动性冲击 / 涨跌停无法成交，净值偏乐观。
+  - **简化成本**：仅计双边交易费率（`BACKTEST_TXN_COST=0.0005` 单边，换仓 round-trip 2×），未计滑点 / 印花税 / 停牌流动性冲击 / 涨跌停无法成交，净值偏乐观。
   - `fetch_benchmark_daily`（沪深 300）实盘路径本环境无网未 runtime 验证，需联网复验；离线走 `generate_benchmark_daily` 确定性模拟基准。
 
 > 本工具仅供学习与研究参考，不构成投资建议。

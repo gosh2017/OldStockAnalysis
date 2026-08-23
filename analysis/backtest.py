@@ -390,7 +390,7 @@ def run_backtest(symbols, *, start, end, freq="Q", hold_days=None,
       top_n    : 每期最多选入数（按 score 降序）
       min_grade: 选股最低等级（grade >= 该等级才入选）
       weight   : equal（等权）/ score（按 score 归一加权）
-      txn_cost : 单边交易成本（0.1%）；换仓双边各扣一次
+      txn_cost : 单边交易成本（默认 0.05%，见 BACKTEST_TXN_COST）；换仓双边各扣一次
       benchmark: 基准指数代码
       demo     : demo 模式（用 generate_all_demo_data 宽跨度模拟数据，全程无网）
 

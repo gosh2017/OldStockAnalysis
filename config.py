@@ -235,7 +235,7 @@ BACKTEST_HOLD_PERIOD    = None  # 持有期交易日数；None=持有至下一�
 BACKTEST_TOP_N          = 10    # 每期最多选入标的数（按 score 降序）
 BACKTEST_MIN_GRADE      = "B"   # 选股最低等级（grade >= 该等级才入选）
 BACKTEST_WEIGHT         = "equal"  # 组合权重：equal(等权) / score(按 score 归一加权)
-BACKTEST_TXN_COST       = 0.001  # 单边交易成本（0.1%）；换仓双边各扣一次 → round-trip 2×
+BACKTEST_TXN_COST       = 0.0005  # 单边交易成本（0.05%）；换仓双边各扣一次 → round-trip 2×
 BACKTEST_BENCHMARK      = "000300"  # 基准指数（沪深 300）
 BACKTEST_LOOKBACK_YEARS = 10     # 默认回测回溯年数（未给 --years 时 end=今天、start=今天−N 年）
 BACKTEST_PUB_LAG_DAYS   = 120    # 财报披露滞后保守口径（年报次年 4–5 月披露，≈4 个月）

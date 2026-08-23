@@ -40,7 +40,7 @@
 
 - **现状**：无回测能力，无法验证信号有效性。
 - **改法**：
-  1. `run_backtest(symbols, *, start, end, freq="Q", hold_days=None, top_n=10, min_grade="B", weight="equal", txn_cost=0.001, benchmark="000300", demo=False) -> BacktestResult`：
+  1. `run_backtest(symbols, *, start, end, freq="Q", hold_days=None, top_n=10, min_grade="B", weight="equal", txn_cost=0.0005, benchmark="000300", demo=False) -> BacktestResult`：
      - 调仓日序列：按 `freq`（M/Q/Y）生成 `[start, end]` 内的调仓日（`dateutil` 不可用时手写月末/季末）。
      - 每个调仓日 T：对每只标的调 `analyze_as_of`（D2）得 score/grade/recommendation/price；按 `min_grade` 与 `top_n` 选股（先筛 `grade ≥ min_grade` 再按 score 降序取 `top_n`；不足全取，空仓则该期持有现金）。
      - 组合权重：`equal` 等权 / `score` 按 score 归一加权；换仓时按 `txn_cost` 扣双边成本。
@@ -75,7 +75,7 @@
 
 - **现状**：`config.py` 无回测参数；`demo_data` 的财务/现金流是单期快照，不支持"按 as_of 截断后仍有多期年报"；`main.py` 无 `--backtest*` 入口。
 - **改法**：
-  1. `config.py` 新增（集中配置，带注释）：`BACKTEST_REBALANCE_FREQ="Q"`、`BACKTEST_HOLD_PERIOD=None`（None=至下期）、`BACKTEST_TOP_N=10`、`BACKTEST_MIN_GRADE="B"`、`BACKTEST_WEIGHT="equal"`、`BACKTEST_TXN_COST=0.001`（双边各 0.1%）、`BACKTEST_BENCHMARK="000300"`、`BACKTEST_LOOKBACK_YEARS=10`、`BACKTEST_PUB_LAG_DAYS=120`、`BACKTEST_RISK_FREE=None`（None=取国债历史末值年化）。
+  1. `config.py` 新增（集中配置，带注释）：`BACKTEST_REBALANCE_FREQ="Q"`、`BACKTEST_HOLD_PERIOD=None`（None=至下期）、`BACKTEST_TOP_N=10`、`BACKTEST_MIN_GRADE="B"`、`BACKTEST_WEIGHT="equal"`、`BACKTEST_TXN_COST=0.0005`（双边各 0.05%）、`BACKTEST_BENCHMARK="000300"`、`BACKTEST_LOOKBACK_YEARS=10`、`BACKTEST_PUB_LAG_DAYS=120`、`BACKTEST_RISK_FREE=None`（None=取国债历史末值年化）。
   2. `data/demo_data.py`：把财务/现金流/分红/PE-PB 的 demo 生成改为**跨 10 年多报告期序列**（按标的种子派生逐年报告期行，ROE/净利/FCF 带温和趋势与噪声），使 D1 截断到任意 as_of 都能取到"该时点已知的多期财务"。保留向后兼容（`main --demo` 仍取最近若干年，口径不变）。
   3. `main.py`：新增 `--backtest FILE`（实盘，读 `代码,名称` 清单）与 `--backtest-demo`（内置 `BATCH_DEMO_LIST` + 模拟数据）；调用 `run_backtest` → `compute_metrics` → 图表 → 打印业绩表 + 各等级前向收益表 + 结论（"A 级平均前向收益 X% vs D 级 Y%，信号{有效/无效}"）。`--years` 复用为回测区间；`--out-dir` 复用。
 - **验收**：`python main.py --backtest-demo` 全流程跑通，打印业绩表 + 等级前向收益表 + 生成图表；`--backtest-demo --no-chart` 不生成图；`python main.py --demo` 与 `--batch-demo` 零回归（demo_data 时序化后取数口径不变）。
