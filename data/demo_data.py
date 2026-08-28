@@ -357,6 +357,33 @@ def generate_industry_info(symbol: str = STOCK_CODE) -> dict:
     }
 
 
+def generate_stock_screening_data() -> pd.DataFrame:
+    """
+    返回 demo 批量筛选表 [代码, 名称, 总市值, 行业, 桶]，对应实盘
+    fetch_stock_screening_data。基于 _DEMO_STOCK_LIST + _DEMO_INDUSTRY，
+    总市值按固定种子确定性派生（跨运行稳定，便于测试），单位为元——
+    与实盘 stock_zh_a_spot_em 总市值列口径一致；区间约 50 亿 ~ 8000 亿元，
+    覆盖小 / 中 / 大盘以演示市值区间筛选。行业取 _DEMO_INDUSTRY（未命中 →
+    None），再经 map_to_industry_bucket 分桶（None → "其他"）。
+    """
+    # 局部导入避免 fetcher↔demo_data 循环依赖；复用同一纯映射函数保证口径一致
+    from data.fetcher import map_to_industry_bucket
+    rng = np.random.RandomState(42)
+    # 各 demo 标的总市值（亿元），确定性生成、clip 到 50 ~ 8000
+    caps_yi = np.clip(rng.uniform(50, 8000, len(_DEMO_STOCK_LIST)), 50, 8000)
+    rows = []
+    for (code, name), cap_yi in zip(_DEMO_STOCK_LIST, caps_yi):
+        industry = _DEMO_INDUSTRY.get(code)
+        rows.append({
+            "代码": code,
+            "名称": name,
+            "总市值": round(float(cap_yi) * 1e8, 2),  # 亿元 → 元
+            "行业": industry,
+            "桶": map_to_industry_bucket(industry),
+        })
+    return pd.DataFrame(rows, columns=["代码", "名称", "总市值", "行业", "桶"])
+
+
 def generate_all_demo_data(ctx=None, *, backtest: bool = False) -> dict:
     """
     一次性生成所有分析步骤所需的模拟数据。

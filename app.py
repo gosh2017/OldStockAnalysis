@@ -31,8 +31,10 @@ from config import (
     BACKTEST_REBALANCE_FREQ, BACKTEST_HOLD_PERIOD, BACKTEST_TOP_N,
     BACKTEST_MIN_GRADE, BACKTEST_WEIGHT, BACKTEST_TXN_COST,
     BACKTEST_BENCHMARK, BACKTEST_LOOKBACK_YEARS,
+    MARKET_CAP_DEFAULT_MIN_YI, MARKET_CAP_DEFAULT_MAX_YI,
 )
-from data import fetch_stock_list, generate_stock_list, search_stocks
+from data import (fetch_stock_list, generate_stock_list, search_stocks,
+                  fetch_stock_screening_data, generate_stock_screening_data)
 from analysis import run_backtest, BacktestResult
 from main import main, run_batch, BATCH_DEMO_LIST
 
@@ -65,21 +67,23 @@ def run_analysis(symbol, name, demo, fin_start, fin_end):
         return main(ctx, quiet=True)
 
 
-def run_batch_silent(demo=True, items=None):
+def run_batch_silent(demo=True, items=None, on_progress=None):
     buf = io.StringIO()
     with redirect_stdout(buf):
-        return run_batch(items or BATCH_DEMO_LIST, demo=demo)
+        return run_batch(items or BATCH_DEMO_LIST, demo=demo, on_progress=on_progress)
 
 
-def run_backtest_silent(items, *, demo, start, end, **kwargs):
+def run_backtest_silent(items, *, demo, start, end, on_progress=None, **kwargs):
     """静默执行回测（复用 analysis.run_backtest），返回 BacktestResult。
 
     kwargs 透传 run_backtest 的 freq/hold_days/top_n/min_grade/weight/txn_cost/benchmark。
     demo 走 generate_all_demo_data(backtest=True) 全程无网；live 需联网预取。
+    on_progress 透传给 run_backtest，供仪表盘 st.progress 实时渲染两阶段进度。
     """
     buf = io.StringIO()
     with redirect_stdout(buf):
-        return run_backtest(items, start=start, end=end, demo=demo, **kwargs)
+        return run_backtest(items, start=start, end=end, demo=demo,
+                            on_progress=on_progress, **kwargs)
 
 
 def _parse_batch_text(text: str) -> list:
@@ -160,6 +164,229 @@ def _remove_nth_active_line(key: str, n: int) -> None:
             seen += 1
         out.append(line)
     st.session_state[key] = "\n".join(out)
+
+
+def _append_pairs_to_input(key: str, pairs) -> int:
+    """把 [(code, name), ...] 追加到 session_state[key] 文本（按 `代码,名称`
+    去重、保留已有行与注释/空行），返回实际新增数量。追加后即时落盘。
+
+    供「批量筛选」一键加入「批量排名 / 历史回测」清单复用——与侧边栏单只
+    「➕」按钮同口径（_pair_key = f"{code},{name}"），输入框仍为唯一数据源。
+    """
+    existing = set(_active_input_lines(st.session_state.get(key, "")))
+    buf = st.session_state.get(key, "")
+    added = 0
+    for code, name in pairs:
+        pair = f"{code},{name}"
+        if pair in existing:
+            continue
+        buf = (buf + "\n" + pair).lstrip("\n")
+        existing.add(pair)
+        added += 1
+    if added:
+        st.session_state[key] = buf
+        _save_dashboard_inputs()
+    return added
+
+
+def _render_screening_tab(demo: bool):
+    """批量筛选标签页：按市值区间 + 申万一级行业筛选 A 股，勾选后一键加入
+    「批量排名」或「历史回测」清单。Demo 即时返回模拟数据；实盘首次加载需逐
+    行业拉成份股（约 30 次联网），日级缓存。"""
+    st.markdown("按**市值区间**与**申万一级行业**筛选 A 股，勾选后一键加入"
+                "「批量排名」或「历史回测」清单。")
+    st.caption("当前模式：" + ("Demo（离线模拟数据）" if demo
+               else "在线（首次加载需逐行业拉成份股，约 30 次联网；日级缓存）"))
+
+    _c1, _c2 = st.columns([3, 1])
+    with _c1:
+        _load_clicked = st.button("🔍 加载筛选表", type="primary",
+                                  use_container_width=True,
+                                  help="加载全 A 股总市值 + 申万一级行业归属")
+    with _c2:
+        _refresh_clicked = st.button("🔄 刷新", use_container_width=True,
+                                     help="绕过缓存强制重拉（实盘用于更新市值）")
+
+    if _load_clicked or _refresh_clicked:
+        if demo:
+            st.session_state["screening_df"] = generate_stock_screening_data()
+            st.session_state.pop("screening_err", None)
+        else:
+            _hint = "加载筛选表中（总市值 + 逐行业成份股）…"
+            _bar = st.progress(0.0, text=_hint)
+
+            def _on_prog(done, total, desc=None):
+                _bar.progress(min(done / total, 1.0) if total else 0.0,
+                              text=desc or _hint)
+
+            _got, _err = None, None
+            try:
+                _got = fetch_stock_screening_data(
+                    force_refresh=_refresh_clicked, on_progress=_on_prog)
+            except Exception as e:
+                _err = f"筛选表加载失败：{e}"
+            if isinstance(_got, pd.DataFrame) and not _got.empty:
+                st.session_state["screening_df"] = _got
+                st.session_state.pop("screening_err", None)
+                _bar.progress(1.0, text="筛选表加载完成")
+            else:
+                # fetch_stock_screening_data 在 akshare 返回空/超时时静默返回 None
+                # （不抛异常），需在此显式判定失败态：给出可操作的错误，而非误报
+                # 「完成」、又回落到"点击加载"引导——那会让用户看到"完成"却无表。
+                _bar.empty()
+                if _err is None:
+                    _err = ("筛选表加载失败：未能获取实时行情数据（akshare 返回空或"
+                            "超时，需联网拉取全市场市值 + 31 个申万一级行业成份股）。"
+                            "可在左侧栏勾选 Demo 模式离线预览，或稍后点「🔄 刷新」重试。")
+                st.session_state["screening_err"] = _err
+                # 失败时不覆盖 screening_df：保留上一次成功结果，由下游渲染旧表 +
+                # 警告（避免刷新失败把已加载的表也清掉）。
+
+    _sdf = st.session_state.get("screening_df")
+    _serr = st.session_state.get("screening_err")
+    _no_table = _sdf is None or (isinstance(_sdf, pd.DataFrame) and _sdf.empty)
+    if _serr and _no_table:
+        # 首次加载即失败：报错引导（切 Demo / 重试），不显示"点击加载"引导。
+        st.error(_serr)
+    elif _serr:
+        # 刷新失败但旧表仍在：照常渲染旧表，并在顶部警告本次刷新未成功。
+        st.warning(_serr)
+    if _no_table:
+        if not _serr:
+            st.info("👈 点击「🔍 加载筛选表」开始（Demo 模式即时返回模拟数据）。")
+        return
+
+    # 行业归属可能整体缺失（实盘行业源失败降级）—— 仅市值筛可用
+    _no_industry = (_sdf["行业"].isna().all()
+                    if "行业" in _sdf.columns else True)
+    if _no_industry:
+        st.warning("⚠️ 行业归属获取失败，仅支持市值区间筛选（行业筛选暂不可用）。")
+    st.caption(f"筛选表已加载：共 {len(_sdf)} 只"
+               + ("" if _no_industry
+                  else f"，其中 {int(_sdf['行业'].notna().sum())} 只有行业归属"))
+
+    # --- 过滤器：市值区间 + 行业（申万一级，可多选）---
+    _industries = (sorted([str(x) for x in _sdf["行业"].dropna().unique().tolist()])
+                   if not _no_industry else [])
+    _f1, _f2, _f3 = st.columns([1, 1, 2])
+    with _f1:
+        cap_min = st.number_input("市值下限（亿元）", min_value=0,
+                                  value=MARKET_CAP_DEFAULT_MIN_YI, step=100,
+                                  help="0 或留空 = 不限下限")
+    with _f2:
+        cap_max = st.number_input("市值上限（亿元）", min_value=0,
+                                  value=MARKET_CAP_DEFAULT_MAX_YI, step=100,
+                                  help="留空 = 不限上限")
+    with _f3:
+        sel_industries = st.multiselect(
+            "行业（申万一级，可多选，留空=不限）", _industries,
+            help="按申万一级行业名筛选；实盘约 31 个一级行业。")
+
+    mask = pd.Series(True, index=_sdf.index)
+    if cap_min:  # 0 / None → 不限
+        mask &= _sdf["总市值"] >= float(cap_min) * 1e8
+    if cap_max:
+        mask &= _sdf["总市值"] <= float(cap_max) * 1e8
+    if sel_industries:
+        mask &= _sdf["行业"].isin(sel_industries)
+    filtered = _sdf[mask].reset_index(drop=True)
+
+    st.caption(f"符合筛选条件：**{len(filtered)}** 只")
+    if filtered.empty:
+        st.warning("无符合筛选条件的股票，请放宽市值区间或行业。")
+        return
+
+    # 勾选表格（data_editor）：仅"选择"列可编辑，其余只读。
+    # 「选择」列初值由全选标志驱动——CheckboxColumn 直接渲染数据列的布尔值，
+    # 故把"选择"写成 True 即在界面上看到全勾选；写 False 即全不选。
+    # 全选 / 取消全选除翻转标志外，还要 bump 一个 key 版本号：data_editor 前端
+    # 会缓存逐行编辑补丁（用户手动取消的某行 = 补丁 {row: False}），光改数据
+    # 列盖不掉该补丁；换 key → 重新挂载的表格丢弃旧补丁 → 全选才能把之前手动
+    # 取消的行重新勾上。改筛选条件时筛选签名变化、key 随之变化，同样清空勾选。
+    _filt_sig = "%s_%s_%s" % (
+        int(cap_min or 0), int(cap_max or 0), "-".join(sel_industries))
+    _selall_key = "_screening_selall_" + _filt_sig   # 按筛选条件分桶：换筛选 → 新桶 → 默认 False
+    _selall = st.session_state.get(_selall_key, False)
+    _ed_ver = st.session_state.get("_screening_ed_ver", 0)
+    _ed_key = "screening_ed_%s_%s" % (_filt_sig, _ed_ver)
+
+    _disp = filtered[["代码", "名称", "行业", "桶"]].copy()
+    _disp.insert(0, "选择", _selall)                       # 全选态下整列 True
+    _disp["总市值(亿元)"] = (filtered["总市值"] / 1e8).round(2)
+    _disp = _disp[["选择", "代码", "名称", "总市值(亿元)", "行业", "桶"]]
+
+    _sa1, _sa2, _sa3 = st.columns([1, 1.4, 6])
+    with _sa1:
+        if st.button("☑️ 全选", use_container_width=True,
+                     help="勾选当前筛选结果中的全部股票"):
+            st.session_state[_selall_key] = True
+            st.session_state["_screening_ed_ver"] = _ed_ver + 1   # 换 key 清前端逐行编辑补丁
+            st.rerun()
+    with _sa2:
+        if st.button("☐ 取消全选", use_container_width=True,
+                     help="清除当前筛选结果中的所有勾选"):
+            st.session_state[_selall_key] = False
+            st.session_state["_screening_ed_ver"] = _ed_ver + 1
+            st.rerun()
+    _ed = st.data_editor(
+        _disp,
+        use_container_width=True,
+        hide_index=True,
+        num_rows="fixed",
+        key=_ed_key,
+        column_config={
+            "选择": st.column_config.CheckboxColumn("选择", default=False),
+            "总市值(亿元)": st.column_config.NumberColumn("总市值(亿元)", format="%.2f"),
+        },
+        disabled=["代码", "名称", "总市值(亿元)", "行业", "桶"],
+    )
+
+    _sel = _ed[_ed["选择"]] if "选择" in _ed.columns else _ed.iloc[0:0]
+
+    _b1, _b2 = st.columns(2)
+    with _b1:
+        if st.button("➕ 加入批量排名", type="primary", use_container_width=True):
+            if _sel.empty:
+                st.warning("请先在表格中勾选目标股票。")
+            else:
+                _n = _append_pairs_to_input(
+                    "batch_symbols",
+                    list(zip(_sel["代码"].astype(str), _sel["名称"].astype(str))))
+                if _n:
+                    # 追加发生在 tab_screen（侧边栏之后渲染），不 rerun 则侧边栏
+                    # 「已添加标的」与「批量排名」输入框当帧读不到新值、仍显旧值。
+                    # 写反馈标志后重跑：重跑帧侧边栏先于本标签渲染、即取到新清单。
+                    st.session_state["_screening_feedback"] = (
+                        "success", f"已添加 {_n} 只到「批量排名」清单。")
+                    st.rerun()
+                else:
+                    st.info("所选股票均已在「批量排名」清单中。")
+    with _b2:
+        if st.button("➕ 加入历史回测", type="primary", use_container_width=True):
+            if _sel.empty:
+                st.warning("请先在表格中勾选目标股票。")
+            else:
+                _n = _append_pairs_to_input(
+                    "bt_symbols",
+                    list(zip(_sel["代码"].astype(str), _sel["名称"].astype(str))))
+                if _n:
+                    st.session_state["_screening_feedback"] = (
+                        "success", f"已添加 {_n} 只到「历史回测」清单。")
+                    st.rerun()
+                else:
+                    st.info("所选股票均已在「历史回测」清单中。")
+
+    # 跨 rerun 重放反馈提示：append 后 st.rerun() 会冲掉当帧 st.success/info，
+    # 故写入标志、于重跑帧在此重放。空选 / 已在清单 不触发 rerun，直接提示即可。
+    _fb = st.session_state.pop("_screening_feedback", None)
+    if _fb:
+        _kind, _msg = _fb
+        if _kind == "success":
+            st.success(_msg)
+        elif _kind == "info":
+            st.info(_msg)
+        elif _kind == "warning":
+            st.warning(_msg)
 
 
 # -- plotly 图表构建 ---------------------------------------
@@ -712,13 +939,17 @@ with st.sidebar:
     st.divider()
     st.caption("实盘模式需联网与 AkShare；Demo 模式数据为模拟，非真实行情。")
 
-tab_single, tab_batch, tab_backtest = st.tabs(["单股分析", "批量排名", "历史回测"])
+tab_single, tab_screen, tab_batch, tab_backtest = st.tabs(
+    ["单股分析", "批量筛选", "批量排名", "历史回测"])
 
 with tab_single:
     if "single" in st.session_state:
         render_single(st.session_state["single"])
     else:
         st.info("👈 在左侧设置参数后点击「🚀 开始分析」")
+
+with tab_screen:
+    _render_screening_tab(demo)
 
 with tab_batch:
     st.markdown("对多只标的逐只打分并按综合评分排序。")
@@ -737,11 +968,20 @@ with tab_batch:
         if not items:
             st.error("未解析到任何标的，请按每行 `代码,名称` 输入。")
         else:
-            with st.spinner(f"批量分析中（{len(items)} 只 · {'Demo' if demo else '在线'}）..."):
-                try:
-                    st.session_state["batch"] = run_batch_silent(demo=demo, items=items)
-                except Exception as e:
-                    st.error(f"批量分析失败：{e}")
+            _hint = f"批量分析中（{len(items)} 只 · {'Demo' if demo else '在线'}）…"
+            _bar = st.progress(0.0, text=_hint)
+
+            def _on_prog(done, total, desc=None):
+                _bar.progress(min(done / total, 1.0) if total else 0.0,
+                              text=desc or _hint)
+
+            try:
+                st.session_state["batch"] = run_batch_silent(
+                    demo=demo, items=items, on_progress=_on_prog)
+                _bar.progress(1.0, text="批量分析完成")
+            except Exception as e:
+                _bar.empty()
+                st.error(f"批量分析失败：{e}")
     if "batch" in st.session_state:
         render_batch(st.session_state["batch"])
 
@@ -802,16 +1042,24 @@ with tab_backtest:
         else:
             start = f"{int(bt_start_year)}0101"
             end = f"{int(bt_end_in)}1231"
-            with st.spinner(f"回测中（{len(items)} 只 · {start}~{end} · "
-                            f"freq={freq} · {'Demo' if demo else '在线'}，请稍候...）"):
-                try:
-                    st.session_state["backtest"] = run_backtest_silent(
-                        items, demo=demo, start=start, end=end,
-                        freq=freq, hold_days=hold_days, top_n=top_n,
-                        min_grade=min_grade, weight=weight, txn_cost=txn,
-                        benchmark=BACKTEST_BENCHMARK)
-                except Exception as e:
-                    st.error(f"回测失败：{e}")
+            _hint = (f"回测中（{len(items)} 只 · {start}~{end} · freq={freq} · "
+                     f"{'Demo' if demo else '在线'}），请稍候…")
+            _bar = st.progress(0.0, text=_hint)
+
+            def _on_prog(done, total, desc=None):
+                _bar.progress(min(done / total, 1.0) if total else 0.0,
+                              text=desc or _hint)
+
+            try:
+                st.session_state["backtest"] = run_backtest_silent(
+                    items, demo=demo, start=start, end=end,
+                    freq=freq, hold_days=hold_days, top_n=top_n,
+                    min_grade=min_grade, weight=weight, txn_cost=txn,
+                    benchmark=BACKTEST_BENCHMARK, on_progress=_on_prog)
+                _bar.progress(1.0, text="回测完成")
+            except Exception as e:
+                _bar.empty()
+                st.error(f"回测失败：{e}")
     if "backtest" in st.session_state:
         render_backtest(st.session_state["backtest"])
     else:

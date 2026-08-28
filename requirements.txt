@@ -4,10 +4,12 @@ pandas>=1.5
 numpy>=1.21
 matplotlib>=3.5
 scipy>=1.7            # 用于分位数计算（percentileofscore）；未安装时自动回退 numpy 实现
+tqdm>=4.60            # CLI 批量处理 / 历史回测终端进度条；未安装时自动回退 stderr 百分比打印
 
 # 可选依赖
 plotly>=5.0           # 交互式估值图 + Web 仪表盘图表
 streamlit>=1.30       # Web 仪表盘（streamlit run app.py）；命令行模式不需要
+hikyuu>=2.8           # 批量筛选数据源（本地库优先，告别实时 HTTP 连不上）；未安装/未导入时自动降级到 None
 
 # 开发依赖（运行测试时需要）
 pytest>=7.0

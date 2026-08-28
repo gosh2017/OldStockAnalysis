@@ -245,10 +245,12 @@ def _forward_return(full_daily, buy_date, hold_days, next_date, end) -> tuple[fl
     return p_sell / p_buy - 1.0, delisted
 
 
-def _prefetch_live(symbols, end) -> tuple[dict, dict]:
+def _prefetch_live(symbols, end, *, on_progress=None) -> tuple[dict, dict]:
     """实盘预取：每标的一次全量数据入缓存（市场级数据取一次共享）。
 
     本环境无网，此路径需联网复验（CHANGELOG 已标注）。返回 (caches, market_shared)。
+    on_progress(done, total, desc) 逐标的上报预取进度（CLI 走 tqdm，仪表盘走
+    st.progress）；None 时不报。
     """
     from data import (
         fetch_daily_data, fetch_financial_abstract, fetch_cashflow_detail,
@@ -264,7 +266,8 @@ def _prefetch_live(symbols, end) -> tuple[dict, dict]:
         bond_yield = fetch_bond_yield_10y(end)
 
     caches = {}
-    for sym, _ in symbols:
+    n = len(symbols)
+    for k, (sym, name) in enumerate(symbols):
         caches[sym] = {
             "daily_df": fetch_daily_data(sym, START_DATE, end),
             "fin_abstract": fetch_financial_abstract(sym),
@@ -277,6 +280,8 @@ def _prefetch_live(symbols, end) -> tuple[dict, dict]:
             "market_df": None,
             "industry_info": fetch_industry_info(sym),
         }
+        if on_progress:
+            on_progress(k + 1, n, f"预取数据 {k + 1}/{n} · {name}")
     shared = {"market_pe_history": market_pe_history,
               "bond_yield_history": bond_yield_history,
               "bond_yield": bond_yield}
@@ -379,7 +384,7 @@ def _build_equity_curve(periods, rets_df: pd.DataFrame, calendar: pd.DatetimeInd
 
 def run_backtest(symbols, *, start, end, freq="Q", hold_days=None,
                  top_n=10, min_grade="B", weight="equal", txn_cost=BACKTEST_TXN_COST,
-                 benchmark="000300", demo=False) -> BacktestResult:
+                 benchmark="000300", demo=False, on_progress=None) -> BacktestResult:
     """回测引擎：调仓日序列 → 每标的 analyze_as_of → 选股 → 持有 → 换仓成本 → 日频净值。
 
     参数:
@@ -393,6 +398,9 @@ def run_backtest(symbols, *, start, end, freq="Q", hold_days=None,
       txn_cost : 单边交易成本（默认 0.05%，见 BACKTEST_TXN_COST）；换仓双边各扣一次
       benchmark: 基准指数代码
       demo     : demo 模式（用 generate_all_demo_data 宽跨度模拟数据，全程无网）
+      on_progress: 可选进度回调 (done, total, desc)。两阶段：预取数据（逐标的）+
+        逐期回测（调仓日×标的，调仓日序列确定后 total 方可知，故跨阶段 total 会变，
+        CLI 的 tqdm 据此关旧条开新条，仪表盘 st.progress 据 desc 切阶段文本）。None 不报。
 
     返回 BacktestResult（equity_curve 日频 / positions / trades / benchmark_curve /
     grade_forward_returns / metrics / rebalance_dates）。
@@ -404,13 +412,16 @@ def run_backtest(symbols, *, start, end, freq="Q", hold_days=None,
     # -- 1. 预取全量数据 --
     if demo:
         caches = {}
-        for sym, _ in symbols:
+        n_pre = len(symbols)
+        for k, (sym, name) in enumerate(symbols):
             sym_ctx = StockContext(symbol=sym, name=sym, demo=True, no_chart=True,
                                    start_date=START_DATE, end_date=end)
             caches[sym] = generate_all_demo_data(sym_ctx, backtest=True)
+            if on_progress:
+                on_progress(k + 1, n_pre, f"预取数据 {k + 1}/{n_pre} · {name}")
         bench_daily = generate_benchmark_daily(benchmark, START_DATE, end)
     else:
-        caches, shared = _prefetch_live(symbols, end)
+        caches, shared = _prefetch_live(symbols, end, on_progress=on_progress)
         from data import fetch_benchmark_daily
         bench_daily = fetch_benchmark_daily(benchmark, START_DATE, end)
 
@@ -458,13 +469,19 @@ def run_backtest(symbols, *, start, end, freq="Q", hold_days=None,
     grade_panel = []  # [{date, grade, return, delisted}] 保日期配对（供 bootstrap）
     min_rank = _GRADE_RANK.get(str(min_grade).upper(), 0)
     per_rebal = []  # [{date, results, selected, weights}]
+    n_syms = len(symbols)
+    analysis_total = len(rebal_eff) * n_syms  # 调仓日×标的；含退市跳过槽位以对齐 total
 
     for i, T in enumerate(rebal_eff):
         next_T = rebal_eff[i + 1] if i + 1 < len(rebal_eff) else None
         T_str = pd.Timestamp(T).strftime("%Y%m%d")
         results = {}
         fr_cache = {}  # sym -> (fr, delisted)，供 positions 复用，不重算
-        for sym, name in symbols:
+        for j, (sym, name) in enumerate(symbols):
+            # 逐槽位上报进度（含将跳过的退市标的），使 done / total 严格对齐
+            if on_progress:
+                on_progress(i * n_syms + j + 1, analysis_total,
+                            f"逐期回测 {i + 1}/{len(rebal_eff)} · {name}")
             d_full = full_daily_by_sym.get(sym)
             # 退市排除：末交易日 < T 的标的在 T 买不到，不进分析/选股/信号收益
             if d_full is None or d_full.empty:

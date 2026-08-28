@@ -13,6 +13,7 @@ from .helpers import (
 )
 from .stats import percentile_of_score, bootstrap_ci
 from .cache import disk_cache, clear_cache
+from .progress import Progress
 
 __all__ = [
     "sep",
@@ -26,4 +27,5 @@ __all__ = [
     "bootstrap_ci",
     "disk_cache",
     "clear_cache",
+    "Progress",
 ]

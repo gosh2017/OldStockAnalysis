@@ -23,7 +23,9 @@ import pandas as pd
 from config import (STOCK_CODE, START_DATE, END_DATE,
                     STOCK_LIST_TTL_HOURS, STOCK_INDICATOR_TTL_HOURS,
                     MARKET_PE_TTL_HOURS, BOND_HISTORY_TTL_HOURS, MARKET_PE_BOARD,
-                    INDUSTRY_INFO_TTL_HOURS, SW_TO_BUCKET)
+                    INDUSTRY_INFO_TTL_HOURS, SW_TO_BUCKET,
+                    HIKYUU_INDUSTRY_TO_BUCKET, HIKYUU_INDUSTRY_CATEGORY,
+                    INDUSTRY_KEYWORDS, STOCK_SCREENING_TTL_HOURS)
 from utils import try_fetch, find_col_in, disk_cache, clear_cache
 
 
@@ -566,10 +568,29 @@ def _fetch_baidu_valuation(fn, symbol: str) -> pd.DataFrame | None:
 
 
 def map_to_industry_bucket(industry: str | None) -> str:
-    """申万一级行业名 → 6 桶之一；None / 未知行业 → "其他"。纯函数，无副作用。"""
+    """行业名 → 6 桶之一；None / 未知 → "其他"。纯函数，无副作用。
+
+    两条路径共用：单股 fetch_industry_info（申万一级行业名，仍走 akshare）
+    与批量筛选 _fetch_stock_screening_data_hikyuu（Hikyuu 板块名）。故先查
+    申万表 SW_TO_BUCKET（单股路径零回归），未命中再查 Hikyuu 次表
+    HIKYUU_INDUSTRY_TO_BUCKET，再未命中走有序关键词兜底
+    INDUSTRY_KEYWORDS（子串匹配，覆盖东财 ~496 细粒度名的长尾），仍无命中
+    → "其他"。关键词顺序是关键（见 config 注释），精确表优先 → 零回归。
+    """
     if not industry:
         return "其他"
-    return SW_TO_BUCKET.get(str(industry).strip(), "其他")
+    name = str(industry).strip()
+    if not name:
+        return "其他"
+    if name in SW_TO_BUCKET:
+        return SW_TO_BUCKET[name]
+    if name in HIKYUU_INDUSTRY_TO_BUCKET:
+        return HIKYUU_INDUSTRY_TO_BUCKET[name]
+    # 关键词兜底：按 INDUSTRY_KEYWORDS 顺序子串匹配，命中即返回对应桶
+    for kw, bucket in INDUSTRY_KEYWORDS:
+        if kw in name:
+            return bucket
+    return "其他"
 
 
 def fetch_industry_info(symbol: str = STOCK_CODE, force_refresh: bool = False) -> dict:
@@ -808,3 +829,283 @@ def search_stocks(query: str, stock_list: pd.DataFrame | None,
             scored.append((code, names[i], s))
     scored.sort(key=lambda x: x[2], reverse=True)
     return scored[:limit]
+
+
+def fetch_stock_screening_data(force_refresh: bool = False,
+                               on_progress=None) -> pd.DataFrame | None:
+    """
+    获取全 A 股批量筛选表 [代码, 名称, 总市值, 行业, 桶]，供仪表盘按
+    市值区间 + 行业筛选。带本地磁盘缓存（STOCK_SCREENING_TTL_HOURS，默认 24h）：
+    缓存有效直接读盘，过期/缺失/force_refresh 才联网。失败结果（None/空）不落盘。
+
+    数据源：Hikyuu 本地库（一次性 pytdx 导入后查询全走本地，不再依赖实时 HTTP）。
+    口径：总市值 = 总股本(万股) × 1e4 × 最近收盘(元)；行业 = Hikyuu 行业板块名
+    （stock.get_belong_to_block_list(category=HIKYUU_INDUSTRY_CATEGORY)）经
+    map_to_industry_bucket 分桶（先申万次表 SW_TO_BUCKET，未命中 Hikyuu 表）。
+    on_progress(done, total, desc) 回报逐只取数进度（缺省 None 即不报），
+    与 run_batch / run_backtest 同款回调。
+
+    降级：hikyuu 未装 / 本地库未导入（sm 空 / load_hikyuu 抛 HKUException）→
+    返回 None（app 层 st.error 提示切 Demo 或先跑导入）；总股本或收盘取不到
+    的标的总市值置 NaN（市值筛排除），行业取不到置 None / 桶 "其他"。
+    旧 akshare 链路（_fetch_stock_screening_data_live + _fetch_sw_industry_map）
+    保留为休眠代码备手动切换；本函数不再调用它们（用户明确"别用 akshare 了"）。
+    """
+    return disk_cache(
+        "stock_screening.pkl", STOCK_SCREENING_TTL_HOURS,
+        lambda: _fetch_stock_screening_data_hikyuu(on_progress),
+        force_refresh=force_refresh,
+    )
+
+
+def _hku_last_close(stock, Query):
+    """stock.get_kdata(Query(-1))[-1].close（最近收盘，元）；取不到返回 None。"""
+    try:
+        kd = stock.get_kdata(Query(-1))
+        return float(kd[-1].close) if len(kd) else None
+    except Exception:
+        return None
+
+
+def _hku_total_count(stock):
+    """stock.get_weight()[-1].total_count（总股本，单位万股）；取不到返回 None。"""
+    try:
+        wl = stock.get_weight()
+        if not len(wl):
+            return None
+        return float(wl[-1].total_count)
+    except Exception:
+        return None
+
+
+def _hku_industry_name(stock):
+    """stock 所属行业板块名（Hikyuu 板块，category=HIKYUU_INDUSTRY_CATEGORY
+    过滤，排除概念/地域/指数板块）；取不到返回 None。"""
+    try:
+        bl = stock.get_belong_to_block_list(category=HIKYUU_INDUSTRY_CATEGORY)
+        if not bl:
+            return None
+        return str(bl[0].name)
+    except Exception:
+        return None
+
+
+def _is_a_share(stock):
+    """粗筛沪深京 A 股：market∈{SH,SZ,BJ} 且 code 6 位、前缀属 A 股段。
+
+    SH: 60(主板 600/601/603/605) / 68(科创板 688)；
+    SZ: 00(主板/中小板 000/001/002/003) / 30(创业板 300/301)；
+    BJ: 43/83/87/92(北交所 430/830/870/920)。
+    迭代 sm 的主枚举口径——预定义板块 get_block("A",…) 不全（"沪深"=3193
+    漏创业板/科创板），_is_a_share 迭代得 ~5400 只沪深京全 A 股。"""
+    try:
+        mkt = str(stock.market).upper()
+        code = str(stock.code)
+    except Exception:
+        return False
+    if len(code) != 6 or not code.isdigit():
+        return False
+    if mkt == "SH":
+        return code[:2] in ("60", "68")
+    if mkt == "SZ":
+        return code[:2] in ("00", "30")
+    if mkt == "BJ":
+        return code[:2] in ("43", "83", "87", "92")
+    return False
+
+
+def _fetch_stock_screening_data_hikyuu(on_progress=None) -> pd.DataFrame | None:
+    """用 Hikyuu 本地库构建全 A 股批量筛选表（不走缓存，不走实时 HTTP）。
+
+    替代旧 akshare 实时链路（stock_zh_a_spot_em + sw_index_first_info +
+    index_component_sw 31 次循环），根因：东财/乐咕/申万 HTTP 端点频繁连不上。
+    Hikyuu 一次性 pytdx 导入后查询全走本地（HDF5 kdata + SQLite 板块/股本）。
+    """
+    try:
+        import hikyuu as hku
+    except ImportError:
+        print("  [X] 未安装 hikyuu（pip install hikyuu），批量筛选不可用。")
+        return None
+
+    if on_progress is not None:
+        try:
+            on_progress(0, 0, "初始化 Hikyuu 本地库…")
+        except Exception:
+            pass
+
+    # 本地库未导入时 load_hikyuu 抛 HKUException（no such table: block）——吞掉，
+    # 返回 None 让 app 层提示"未导入"。
+    # load_weight 必须为 True：get_weight() 的总股本（total_count，万股）只在
+    # load_weight=True 时载入内存，False 则 get_weight() 返回空 → 总市值全 NaN。
+    try:
+        hku.load_hikyuu(load_history_finance=False, load_weight=True,
+                        start_spot=False)
+    except Exception as e:
+        print(f"  [X] Hikyuu 本地库未初始化或未导入数据: "
+              f"{type(e).__name__}: {e}")
+        print("      请先跑数据导入：python scripts/run_hikyuu_import.py")
+        return None
+
+    sm = hku.sm
+    if not len(sm):
+        print("  [X] Hikyuu StockManager 为空（本地库未导入数据），"
+              "批量筛选不可用。")
+        return None
+
+    Query = hku.Query
+    # 沪深京 A 股枚举：直接迭代 sm 按 _is_a_share 过滤。
+    # 不用预定义板块 get_block("A","沪深")——实测仅 3193 只，漏创业板/科创板；
+    # _is_a_share 迭代得 ~5400 只沪深京全 A 股（含北交所），与旧 akshare
+    # spot_em 口径一致。迭代 sm（~8200）开销可忽略（一次性，缓存 24h）。
+    stocks = [s for s in sm if _is_a_share(s)]
+    print(f"  [OK] 迭代 sm 过滤得沪深京 A 股 {len(stocks)} 只")
+    if not stocks:
+        print("  [X] 枚举到 0 只 A 股（本地库未导入？），批量筛选不可用。")
+        return None
+
+    total = len(stocks)
+    rows = []
+    for i, s in enumerate(stocks):
+        if s is None or (hasattr(s, "is_null") and s.is_null()) or not s.valid:
+            continue
+        code = str(s.code)
+        if len(code) != 6 or not code.isdigit():
+            continue
+        close = _hku_last_close(s, Query)
+        tc = _hku_total_count(s)
+        cap = tc * 1e4 * close if (tc and close and tc > 0 and close > 0) else float("nan")
+        industry = _hku_industry_name(s)
+        rows.append({
+            "代码": code, "名称": str(s.name), "总市值": cap,
+            "行业": industry, "桶": map_to_industry_bucket(industry),
+        })
+        if on_progress is not None and (i % 200 == 0 or i == total - 1):
+            try:
+                on_progress(i + 1, total, f"Hikyuu 取数 {i + 1}/{total}")
+            except Exception:
+                pass
+
+    if not rows:
+        print("  [X] 取数后 0 行（全部标的无效？），批量筛选不可用。")
+        return None
+    df = pd.DataFrame(rows, columns=["代码", "名称", "总市值", "行业", "桶"])
+    have_ind = int(df["行业"].notna().sum())
+    have_cap = int(df["总市值"].notna().sum())
+    if have_ind == 0:
+        print(f"  [!] 批量筛选表(Hikyuu): {len(df)} 只，总市值有效 {have_cap} 只，"
+              "但行业归属为 0 —— 行业板块未导入（桶全「其他」，行业筛选失效）。")
+        print(f"      请跑：python scripts/import_hikyuu_industry_blocks.py  "
+              "（一次性，~10-30min，仅导入期触网），之后重开批量筛选。")
+    else:
+        msg = (f"[OK] 批量筛选表(Hikyuu): {len(df)} 只，{have_ind} 只有行业归属，"
+               f"总市值有效 {have_cap} 只")
+        print(msg)
+    return df
+
+
+def _fetch_stock_screening_data_live(on_progress=None) -> pd.DataFrame | None:
+    """实时获取全 A 股批量筛选表（不走缓存）。"""
+    print("\n[INFO] 正在获取批量筛选表（总市值 + 申万一级行业）...")
+
+    # --- 1. 总市值：东财实时行情（含代码 / 名称 / 总市值，单位元）---
+    fn_spot = getattr(ak, "stock_zh_a_spot_em", None)
+    if fn_spot is None:
+        print("  [X] ak.stock_zh_a_spot_em 不可用，批量筛选不可用。")
+        return None
+    # spot_em 单次拉取全市场（~5000 只）可能耗时数十秒且含重试退避，期间无回调；
+    # 先回报一句进度文案，让仪表盘进度条不致卡在通用提示上被误以为"假死"。
+    if on_progress is not None:
+        try:
+            on_progress(0, 0, "获取全市场实时行情（东财 spot_em，约 5000 只）…")
+        except Exception:
+            pass
+    spot = try_fetch(fn_spot)
+    if spot is None or spot.empty:
+        print("  [X] 未能获取全市场实时行情，批量筛选不可用。")
+        return None
+
+    code_col = find_col_in(["代码", "code"], spot)
+    name_col = find_col_in(["名称", "简称", "name"], spot)
+    cap_col = find_col_in(["总市值"], spot)
+    if not code_col or not name_col or not cap_col:
+        print("  [X] spot_em 列结构异常（缺代码/名称/总市值），批量筛选不可用。")
+        return None
+
+    df = pd.DataFrame({
+        "代码": spot[code_col].astype(str).str.extract(r'(\d{6})', expand=False),
+        "名称": spot[name_col].astype(str).str.strip(),
+        "总市值": pd.to_numeric(spot[cap_col], errors="coerce"),
+    })
+    df = df.dropna(subset=["代码"]).reset_index(drop=True)
+    print(f"  [OK] 总市值: {len(df)} 只（spot_em）")
+
+    # --- 2. 行业归属：申万一级成份股循环构建 代码→行业名 映射 ---
+    industry_map = _fetch_sw_industry_map(on_progress)
+    if industry_map:
+        df["行业"] = df["代码"].map(industry_map)
+        have_ind = int(df["行业"].notna().sum())
+        print(f"  [OK] 行业归属覆盖 {have_ind}/{len(df)} 只")
+    else:
+        df["行业"] = None
+        print("  [!] 行业归属拉取失败，仅支持市值区间筛选（行业列置空）。")
+    df["桶"] = df["行业"].apply(map_to_industry_bucket)
+
+    print(f"[OK] 批量筛选表: {len(df)} 只，"
+          f"{int(df['行业'].notna().sum())} 只有行业归属")
+    return df
+
+
+def _fetch_sw_industry_map(on_progress=None) -> dict:
+    """
+    构建 代码 → 申万一级行业名 映射。数据源：sw_index_first_info 取 31 个
+    一级行业代码+名称，index_component_sw 逐行业拉成份股。任一环节失败返回 {}
+    （调用方按市值区间降级筛选）。on_progress(done, total, desc) 回报循环进度。
+    """
+    fn_first = getattr(ak, "sw_index_first_info", None)
+    if fn_first is None:
+        print("  [X] ak.sw_index_first_info 不可用，行业映射跳过。")
+        return {}
+    first_df = try_fetch(fn_first)
+    if first_df is None or first_df.empty:
+        print("  [X] 申万一级行业分类获取失败，行业映射跳过。")
+        return {}
+    code_col = find_col_in(["行业代码", "代码"], first_df)
+    name_col = find_col_in(["行业名称", "名称"], first_df)
+    if not code_col or not name_col:
+        print("  [X] sw_index_first_info 列结构异常，行业映射跳过。")
+        return {}
+
+    industries = list(zip(
+        first_df[code_col].astype(str).str.strip(),
+        first_df[name_col].astype(str).str.strip(),
+    ))
+    fn_comp = getattr(ak, "index_component_sw", None)
+    if fn_comp is None:
+        print("  [X] ak.index_component_sw 不可用，行业映射跳过。")
+        return {}
+
+    total = len(industries)
+    mapping: dict = {}
+    for i, (ind_code, ind_name) in enumerate(industries):
+        comp = try_fetch(fn_comp, symbol=ind_code)
+        n = 0
+        if comp is not None and not comp.empty:
+            sc = find_col_in(["证券代码", "代码", "stockcode"], comp)
+            if sc:
+                codes = (comp[sc].astype(str)
+                         .str.extract(r'(\d{6})', expand=False).dropna())
+                for c in codes:
+                    mapping[c] = ind_name
+                n = len(codes)
+        if n:
+            print(f"  [OK] {ind_name}（{ind_code}）: {n} 只")
+        else:
+            print(f"  [!] {ind_name}（{ind_code}）: 成份股获取失败，跳过")
+        if on_progress is not None:
+            try:
+                on_progress(i + 1, total, f"行业成份 {i + 1}/{total}")
+            except Exception:
+                pass
+
+    print(f"  [OK] 行业映射覆盖 {len(mapping)} 只股票")
+    return mapping

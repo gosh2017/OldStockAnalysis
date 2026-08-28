@@ -35,7 +35,7 @@ from config import (
     BACKTEST_BENCHMARK, BACKTEST_LOOKBACK_YEARS, BACKTEST_RISK_FREE,
     BOND_SMOOTH_POINTS,
 )
-from utils import sep, recent_value
+from utils import sep, recent_value, Progress
 from data import (
     fetch_daily_data,
     fetch_financial_abstract,
@@ -290,16 +290,23 @@ def _read_batch_file(path: str) -> list:
     return items
 
 
-def run_batch(items: list, demo: bool = False, years=None) -> pd.DataFrame:
+def run_batch(items: list, demo: bool = False, years=None,
+              on_progress=None) -> pd.DataFrame:
     """对多只标的逐只执行分析并按综合评分排名。
 
     years: 可选 (起始年, 结束年)，覆盖 config 默认基本面年份区间。
+    on_progress: 可选回调 (done, total, desc)，逐只上报进度。CLI 由 _cli 包一层
+        tqdm Progress；Streamlit 仪表盘传 st.progress 闭包；None 时不报。
     """
     mode = "demo" if demo else "live"
     print(f"\n{'=' * 70}\n  批量选股打分（{len(items)} 只标的 · {mode} 模式）\n{'=' * 70}")
 
     rows = []
-    for symbol, name in items:
+    n = len(items)
+    for i, (symbol, name) in enumerate(items):
+        # 逐只上报进度：done=i（已完成 i 只），desc 标注当前标的；done/total 严格对齐
+        if on_progress:
+            on_progress(i, n, f"批量分析 {i + 1}/{n} · {name}")
         # 批量模式抑制图表与逐只步骤打印，静默分析后仅汇总排名
         ctx_kwargs = dict(symbol=symbol, name=name, demo=demo, no_chart=True)
         if years:
@@ -321,6 +328,8 @@ def run_batch(items: list, demo: bool = False, years=None) -> pd.DataFrame:
         except Exception as e:  # 单只失败不影响整体批量
             rows.append({"代码": symbol, "名称": name, "评分": 0.0, "等级": "-",
                          "完整度": "-", "基本面": "错误", "建议": f"出错:{e}"})
+    if on_progress:
+        on_progress(n, n, "批量分析完成")
 
     df = pd.DataFrame(rows).sort_values("评分", ascending=False).reset_index(drop=True)
     sep("批量评分排名")
@@ -358,13 +367,14 @@ def run_backtest_flow(items, *, demo: bool, years, no_chart: bool, out_dir: str 
     if demo:
         print("[INFO] --backtest-demo：使用 seeded 模拟数据，全程无网（非真实行情）")
 
-    result = run_backtest(
-        items, start=start, end=end,
-        freq=BACKTEST_REBALANCE_FREQ, hold_days=BACKTEST_HOLD_PERIOD,
-        top_n=BACKTEST_TOP_N, min_grade=BACKTEST_MIN_GRADE,
-        weight=BACKTEST_WEIGHT, txn_cost=BACKTEST_TXN_COST,
-        benchmark=BACKTEST_BENCHMARK, demo=demo,
-    )
+    with Progress() as prog:
+        result = run_backtest(
+            items, start=start, end=end,
+            freq=BACKTEST_REBALANCE_FREQ, hold_days=BACKTEST_HOLD_PERIOD,
+            top_n=BACKTEST_TOP_N, min_grade=BACKTEST_MIN_GRADE,
+            weight=BACKTEST_WEIGHT, txn_cost=BACKTEST_TXN_COST,
+            benchmark=BACKTEST_BENCHMARK, demo=demo, on_progress=prog,
+        )
 
     if not no_chart:
         plot_equity_curve(result, ctx)
@@ -582,14 +592,16 @@ def _cli():
 
     # -- 批量模式分发 --
     if args.batch_demo:
-        run_batch(BATCH_DEMO_LIST, demo=True, years=args.years)
+        with Progress() as prog:
+            run_batch(BATCH_DEMO_LIST, demo=True, years=args.years, on_progress=prog)
         return
     if args.batch:
         items = _read_batch_file(args.batch)
         if not items:
             print(f"[X] 未从 {args.batch} 读到任何标的（每行格式：代码,名称）")
             return
-        run_batch(items, demo=args.demo, years=args.years)
+        with Progress() as prog:
+            run_batch(items, demo=args.demo, years=args.years, on_progress=prog)
         return
 
     # 解析标的：代码反查名称 / 名称模糊搜索
