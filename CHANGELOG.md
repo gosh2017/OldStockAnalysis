@@ -5,7 +5,31 @@
 
 ## [未发布]
 
-> 新增**历史回测验证模块**（提示词 D，对应 `prompts/04_backtest.md`），验证综合评分信号在历史上是否有效（"A/B 级是否跑赢 D 级与基准"）。回测是现有分析层的"消费者"，以数据注入方式复用 step1–4 / scoring，**不改其算法与权重**。条目以 `(D1)`–`(D6)` 标注回溯至提示词。
+> 将**历史/静态数据查询接口**从 AkShare 实时 HTTP 迁移至 **Hikyuu 本地库**（`code_plan/hikyuu-data-migration.md` 落地）。pytdx 一次性导入后查询全走本地（HDF5 kdata + SQLite stock.db），根因：东财/乐咕/申万 HTTP 端点频繁连不上、`try_fetch` 静默返 None。实时数据（全市场 spot）与市场历史 PE（乐咕）仍走 AkShare；各接口保留 AkShare fallback。本机本地库已就绪（DB 1.2GB，finance 已导入），hku 路径经 live smoke 实测、`--demo`/pytest 零回归。
+
+### 新增（数据源迁移）
+- **共享访问层 `data/hikyuu_backend.py`**：惰性单次 `load_hikyuu(load_history_finance=True, load_weight=True, start_spot=False)`（进程级缓存）、symbol→Stock 解析（含 **bj** 北交所前缀，补 `_prefix_symbol` 漏项）、KData→DataFrame（中文列名，对齐 `_normalize_daily_df` 契约）、HistoryFinance 按名读取（避免 id off-by-one）、weight（分红 bonus / 总股本）、zh_bond10 直读、PB 自算（`收盘 / FINANCE(每股净资产)` PIT 对齐）。未装/未导入时各函数返 None/空，调用方降级 AkShare。
+- **9 个 fetcher 迁移**（hku 优先 + ak fallback，原 akshare 体移私有 `_ak` 函数）：`fetch_daily_data`（FORWARD 前复权）、`fetch_benchmark_daily`（指数 NO_RECOVER）、`fetch_stock_list`（sm 迭代）、`fetch_industry_info`（板块 + weight 总股本）、`fetch_dividend`（get_weight bonus，每10股）、`fetch_bond_yield_history`/`_10y`（zh_bond10）、`fetch_financial_abstract`（HistoryFinance 三表）、`fetch_cashflow_detail`（capex + 折旧+摊销合并列）、`fetch_stock_indicator`（PB 自算 hku、PE 留 akshare）。`_fetch_stock_screening_data_hikyuu` 改用共享 `_hku()` + backend 助手（去重 load/枚举）。
+- **校准探针 `scripts/probe_hikyuu_finance.py`**（§7）：DB 自省（表/字段 id↔name/zh_bond10/block）+ 运行时 dump 样本股（000001/600519/300750）财报字段值+量级单位推断（元/万元/股/%）+ weight + kdata 末收盘；akshare 交叉对照段需联网（离线跳过）。坐实字段单位，避免 ×1e4 量级错误污染 DCF/PE。
+- **测试 `tests/test_hikyuu_backend.py`**（19 例）：backend 各函数 + 迁移后 fetcher 的契约（列名/单位/量级）+ hku 不可用降级；`pytest.importorskip("hikyuu")` + DB 不存在 skip，不构成硬依赖。`pytest -q` **190 项全绿**（171 + 19），`--demo`/`--backtest-demo` 零回归。
+
+### 变更（数据源迁移·对计划文档的校正）
+- **stock.db 路径**：实测位于 `G:/QTrading/StockData/stock.db`（`~/.hikyuu/importdata-gui.ini` 的 `[hdf5] dir`），非计划假设的 `c:\stock`。`config.HIKYUU_DB_PATH` 据此校正。
+- **zh_bond10 单位**：`value` 为「小数×1e6」（末值 18140 ≈ 1.814%），归一小数须 **÷1e6**——计划文档 `/10000` 得 1.814（=181%）是错的，探针捕获并修正。
+- **财报字段 id**：计划 §2.3 的 id（96/95/107/114/281/210/271/4/238）为 DB `id` 列（正确）；运行时 `get_history_finance_field_index(name)` 返回 id-1（0 基数组下标）。`get_history_finance()` 返回 `[(report_date, file_date, values[581])]`。金额字段经量级核实为元（归母净利 ~4e10、权益 ~5e12、capex ~2e9），无需缩放。
+- **行业板块前置**：Hikyuu 行业归属需先跑 `scripts/import_hikyuu_industry_blocks.py` 导入东财行业板块（block 表默认仅指数板块）；未导入时 `fetch_industry_info` 降级 AkShare（仍取行业+总股本），总股本可由 Hikyuu `weight` 提供（不丢）。顺带修 `import_hikyuu_industry_blocks.py` 的 `probe_calibrate` 路径 bug（`from config import` 因 sys.path 缺项目根而静默失败）。
+- **批量筛选行业 fallback（新浪）**：Hikyuu 行业板块当前只导入 19/496（EM push2 间歇性 ProxyError/ConnectionError，已修代理 bug 但端点仍不稳）→ 批量筛选的行业列覆盖率仅 ~18%（银行等大类缺失）。新增 `_fetch_sina_industry_map`（新浪 `stock_sector_spot` + `stock_sector_detail`，~49 行业，端点稳定）作为批量筛选的行业兜底：hku 行业覆盖 < 80% 时自动触发，覆盖可提升至 ~54%（2917/5447），64 个行业（含银行/金融、采掘、供水供气、船舶、飞机等），金融股（47 只）正确归「非银金融」桶（is_financial=True 口径，避免 90% 负债率被错误打分）。申万 `index_component_sw` 批量调用被服务端阻断/返回残缺响应（akshare 的 KeyError 包装被 try_fetch 视为确定性错误不重试），故新浪作为更可靠的兜底源。新浪行业覆盖不到的股票行业留空（~46%），待 EM 恢复后 `import_hikyuu_industry_blocks.py` 补全本地板块即可自动不触发 fallback。`config.HIKYUU_INDUSTRY_TO_BUCKET` 新增新浪行业板块映射（金融→非银金融、采掘/供水供气→周期、家具/物资外贸→消费、船舶/飞机→成长 等）。
+
+### 修复（批量筛选行业兜底）
+- **「申万行业映射」长期失效根因：行业代码未去 `.SI` 后缀**。`sw_index_first_info` 返回 `801780.SI`，而成份端点 `swsresearch.com/.../component_stocks/` 只认裸码——带后缀时返回 `results=[]`，akshare 随后在列选择处抛 `KeyError("证券代码 ... not in index")`。**确定性空响应，重试无效**（此前被误判为"服务端连拉易阻断"，故上条改走新浪兜底）。`_fetch_sw_industry_map` 截后缀后 31 个行业 42/79/104… 只全部正常返回。
+- **兜底链改为三级（精度优先）**：Hikyuu 本地东财板块 →（覆盖 <98%）**申万一级**（31 行业，**银行 42 / 非银金融 79 分列**，覆盖沪深全 A ~5200 只）→（仍 <95%）新浪（仅补残留，主要是北交所）。原先新浪直接兜底会把银行/证券/保险合并成一个「金融行业」→ 桶误判为「非银金融」，银行股打分口径整体错（`is_financial` 同口径但行业桶不同）。拆分 `_fill_industry_from_sw` / `_fill_industry_from_sina` / `_apply_industry_map`（就地改 df，只填 NaN、同步重算桶）。
+- `config.SW_TO_BUCKET` 补申万 2021 版名精确项「纺织服饰→消费」「环保→周期」，使申万 31 行业名走精确表而非关键词兜底。
+- **测试**：新增 `tests/test_industry_fallback.py`（12 例，全离线 mock）：后缀剥离/裸码不误截/空码跳过/重叠取末 + 兜底链顺序（申万优先、新浪仅补残留、申万全覆盖则跳过新浪、本地满覆盖则不联网、申万失败转新浪）+ `_apply_industry_map` 只填 NaN 并重算桶 + 申万 31 行业名分桶 + 银行桶来源守护。`pytest -q` **202 项全绿**。
+- **实测效果**（`force_refresh=True` 重建）：行业覆盖 2917→**5193/5447**（53.5%→95.3%），**「银行」42 只回归**（含工行/建行/招行/浦发/平安），桶「其他」2613→291。
+- **修复（批量筛选市值缺失）**：上条「待办①」已解。① `scripts/run_hikyuu_import.py` 校验判据由 `len(sm)>1000`（基于 Stock 元数据表，导全即 ~7801，恒为真→「日线仅 44%」被静默吞掉）改为实测 A 股 `get_count(DAY)>0` 覆盖率（`_a_share_kdata_coverage`，口径同 `hku_is_a_share`），<95% 重试（env `HKU_IMPORT_COV_THRESHOLD`/`HKU_IMPORT_MAX_ATTEMPTS`，默认 0.95/3）。② 用「day-only + `day_start_date=2024-01-01`」重导：市值口径只需最新收盘、无需 35 年全量历史，每股 fetch ~8500 bar→~650 bar 快约 14×，12min 即把 kdata 覆盖 44%→**99.8%**（5532/5541），**批量筛选市值有效 5510/5527=99.7%**（仅 17 只停牌/退市 pytdx 无近期数据仍缺）。upsert 不删旧数据，已导全量历史不丢；缺漏股的深度历史（1990 起）可后续单独补跑。
+- **待办**：行业名现为多源混合（本地 19 个东财板块 + 申万 31 + 新浪 49），出现「环保/环保行业」「纺织服饰/纺织服装」等近义重复名；桶映射与筛选均正确，仅下拉列表观感冗余，待 EM 恢复后补全本地板块（496 板块）即统一为东财口径。
+
+> 以下为**历史回测验证模块**（提示词 D，对应 `prompts/04_backtest.md`），验证综合评分信号在历史上是否有效（"A/B 级是否跑赢 D 级与基准"）。回测是现有分析层的"消费者"，以数据注入方式复用 step1–4 / scoring，**不改其算法与权重**。条目以 `(D1)`–`(D6)` 标注回溯至提示词。
 
 ### 新增（回测模块）
 - **(D1) 时点数据截断层 `data/pit.py`**：`truncate_to_date`（按日期列模糊匹配截断到 ≤ as_of）、`filter_reports_by_pub_lag`（财报按"报告期 + 披露滞后 120d"过滤，避免把未披露年报当已知 → 未来函数）、`as_of_bundle`（组合产出回测一次调用的全部截断数据）。保证每个调仓日 T 看到的数据不晚于 T。

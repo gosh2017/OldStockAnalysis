@@ -1,6 +1,6 @@
 # 量化价值投资分析系统
 
-基于 **AkShare** 的 A 股长线价值投资量化分析工具。按"基本面筛选 → DCF 估值 → 市场情绪 → 综合建议"四步逻辑评估标的，并在此基础上扩展了**行业分桶、CAGR 推导显性增长、综合评分、PB-ROE 独立锚、数据完整度置信度、HTML 报告、批量选股**等能力。
+基于 **AkShare + Hikyuu 本地库** 的 A 股长线价值投资量化分析工具。**历史/静态数据**（日线/财务/现金流/分红/国债/个股 PB/行业股本/股票列表/基准指数/批量筛选）优先走 Hikyuu 本地库（pytdx 一次性导入后查询零 HTTP），**实时数据**（全市场 spot 快照）与**市场历史 PE**（乐咕）仍走 AkShare；各接口均保留 AkShare fallback，未装/未导入 Hikyuu 时自动降级。按"基本面筛选 → DCF 估值 → 市场情绪 → 综合建议"四步逻辑评估标的，并在此基础上扩展了**行业分桶、CAGR 推导显性增长、综合评分、PB-ROE 独立锚、数据完整度置信度、HTML 报告、批量选股**等能力。
 
 ## 项目结构
 
@@ -15,7 +15,8 @@ OldStockAnalysis/
 │   ├── helpers.py           # 重试、会话注入、列名模糊匹配、股息率估算、ERP 模拟
 │   └── stats.py             # 分位数计算（scipy 优先，numpy 兜底）
 ├── data/
-│   ├── fetcher.py           # AkShare 数据拉取（日线/财务/现金流/分红/市场PE/国债/个股PE-PB/行业归属+总股本/股票列表/基准指数）
+│   ├── fetcher.py           # 数据拉取（Hikyuu 本地库优先 + AkShare fallback：日线/财务/现金流/分红/国债/个股PE-PB/行业归属+总股本/股票列表/基准指数/批量筛选）
+│   ├── hikyuu_backend.py    # Hikyuu 本地库统一访问层（惰性 load/symbol解析/kdata→df/财报字段/权息/国债/PB自算）
 │   ├── demo_data.py         # 离线模拟数据（seeded，按标的派生种子支持批量差异化；backtest 宽跨度多报告期序列）
 │   └── pit.py               # 时点数据截断层（truncate / 披露滞后过滤 / as_of_bundle，回测专用）
 ├── analysis/
@@ -182,15 +183,22 @@ python -m pytest -q
 
 ## 依赖
 
-Python 3.9+ · akshare · pandas · numpy · matplotlib · scipy（分位数，未装自动回退 numpy）· plotly（交互图与仪表盘）· streamlit（Web 仪表盘）· pytest（测试）
+Python 3.9+ · akshare · pandas · numpy · matplotlib · scipy（分位数，未装自动回退 numpy）· plotly（交互图与仪表盘）· streamlit（Web 仪表盘）· **hikyuu>=2.8**（历史/静态数据本地库，推荐安装并完成一次性导入；未装/未导入时自动降级 AkShare）· tqdm（进度条，未装自动回退）· pytest（测试）
 
 ## 已知限定
 
-- **总股本取数**：优先级为行业信息（EM f84）> 日频 `outstanding_share` > 财务摘要；三源全失败返回 `None` 并跳过 DCF 估值（不输出每股价值），实盘优先依赖行业信息源。demo 模式下所有标的的总股本固定为 197.56 亿（平安银行口径），非真实股本。
+- **数据源：Hikyuu 本地库（历史/静态）**：日线/财务/现金流/分红/国债/个股 PB/行业股本/股票列表/基准指数/批量筛选已迁移至 Hikyuu 本地库（`data/hikyuu_backend.py`），pytdx 一次性导入后查询零 HTTP；各接口保留 AkShare fallback。迁移坐实若干口径（探针 `scripts/probe_hikyuu_finance.py`）：
+  - **国债单位**：`zh_bond10.value` 为「小数×1e6」（末值 18140 ≈ 1.814%），归一小数须 **÷1e6**（非 ÷1e4——后者得 1.814 = 181%）。1990-12-19 起（远早于 akshare 2020 起）→ ERP 国债真实覆盖大增。
+  - **财报字段**：用 `FINANCE(name)` 按名取（DB id N 在数组下标 N-1，避免 off-by-one）；金额字段（归母净利/OCF/权益/capex）经量级核实为「元」，总股本字段为「股」，ROE/资产负债率为 0-100 %。`weight.total_count` 为「万股」（×1e4→股），`weight.bonus` 为「每 10 股红利」。
+  - **复权方法差异**：Hikyuu `Query.FORWARD` 与 akshare `qfq` 同为前复权但实现略异，日线数值可能有厘级差异（回测净值/前向收益精确复现受影响）；严格复现可由 fallback 走 akshare。
+  - **行业板块前置**：单股 `fetch_industry_info` 与批量筛选的行业归属需先跑 `python scripts/import_hikyuu_industry_blocks.py`（一次性，仅导入期触网）导入东财行业板块；未导入时行业取不到 → 降级 AkShare `stock_individual_info_em`（仍能取行业+总股本），总股本仍可由 Hikyuu `weight` 提供。
+  - **PE_TTM 自算暂缓**：个股 PB 已由 Hikyuu 自算（`收盘 / FINANCE(每股净资产)`，PIT 对齐），PE 列仍走 AkShare（百度/乐咕）——TTM 4Q 构造留作后续。
+  - **数据新鲜度**：本地库数据新鲜度 = 最近一次导入；需最新国债/行情时重跑 `scripts/run_hikyuu_import.py` 或由 fallback 走 AkShare。
+- **总股本取数**：优先级为行业信息（Hikyuu `weight.total_count`×1e4 或 EM f84）> 日频 `outstanding_share` > 财务摘要；三源全失败返回 `None` 并跳过 DCF 估值（不输出每股价值），实盘优先依赖行业信息源。demo 模式下所有标的的总股本固定为 197.56 亿（平安银行口径），非真实股本。
 - **破产清算 D&A 取数**：折旧摊销从现金流量表取（合并列优先，否则折旧+摊销分列求和）。D&A 不可得时按 FCF×0.5 估算清算口径（不再回退归母净利润），自然满足 `破产清算 ≤ 保守`，事后钳位为 inert 安全网。sina 现金流量表若以行（非列）返回 D&A 致提取为空即走此估算，属可接受降级。离线 demo 已含 D&A 字段验证主路径。
 - **合理估值上限锚定**：EPS 取最新归母净利润/总股本；5 年 PE 中位数取自个股历史 PE 末 5 个日历年。两者均取不到时上限退化为中性 DCF（不做封顶）。
-- **市场情绪分位**：当前 ERP 与"历史市场 PE + 国债历史"按日期对齐得到的历史 ERP 序列比分位（取代旧合成 mock 分布，避免分位恒定无意义）。数据源为乐咕 `stock_market_pe_lg`（akshare 1.17.85 源码确认返回 `[date, close, pe]` 全历史）+ `bond_china_yield`。两者取数失败时回退合成分布 + 默认 PE（demo 亦走此回退路径，仅验证逻辑）。在线路径本环境无网未 runtime 验证，需联网复验。个股 PE/PB 自身分位用近 5 年滚动窗口（`INDIVIDUAL_PERCENTILE_WINDOW_YEARS`），窗口不足回退全历史。
-- **行业分桶**：行业归属依赖 `stock_individual_info_em`（实盘联网）；接口漂移/失败时回退"其他"桶（== 全局口径，零回归）。`SW_TO_BUCKET` 覆盖申万常见一级行业及子行业名兜底，未命中→"其他"。
+- **市场情绪分位**：当前 ERP 与"历史市场 PE + 国债历史"按日期对齐得到的历史 ERP 序列比分位（取代旧合成 mock 分布，避免分位恒定无意义）。市场历史 PE 源为乐咕 `stock_market_pe_lg`（akshare 全历史，**唯一非实时 HTTP 残留**）；国债历史源为 Hikyuu `zh_bond10`（1990 起，本地）→ fallback akshare `bond_china_yield`。两者取数失败时回退合成分布 + 默认 PE（demo 亦走此回退路径，仅验证逻辑）。个股 PE/PB 自身分位用近 5 年滚动窗口（`INDIVIDUAL_PERCENTILE_WINDOW_YEARS`），窗口不足回退全历史；PB 由 Hikyuu 自算、PE 由 AkShare 提供。
+- **行业分桶**：行业归属优先 Hikyuu 行业板块（需先跑 `scripts/import_hikyuu_industry_blocks.py`），未导入/失败时降级 AkShare `stock_individual_info_em`（实盘联网）；均回退"其他"桶（== 全局口径，零回归）。`SW_TO_BUCKET` + `HIKYUU_INDUSTRY_TO_BUCKET` + 关键词兜底三级查表，未命中→"其他"。**批量筛选**的行业列有三级兜底（精度优先，市值/代码/名称始终只走本地）：Hikyuu 本地东财板块 →（覆盖 < 98%）**申万一级** `_fetch_sw_industry_map`（31 行业，**银行/非银金融分列**，覆盖沪深全 A ~5200 只）→（仍 < 95%）新浪 `_fetch_sina_industry_map`（~49 行业，仅补残留如北交所）。新浪无银行粒度（银行/证券/保险合并为「金融行业」→ 非银金融桶），故只作最后一层。申万成份端点只认裸码（`801780` 而非 `sw_index_first_info` 返回的 `801780.SI`），带后缀返空 → 该映射此前长期失效，现已修复。实测覆盖 5193/5447（95.3%），「银行」42 只在列。本地板块补全至 496 个后兜底链自动不触发。
 - **demo 数据**：`--demo` 与 `--batch-demo` 使用按标的派生种子的模拟数据，仅用于验证逻辑，**非真实行情**。行业归属按标的差异化（demo 清单覆盖各桶），但财务/现金流形态仍为银行股近似（000001 口径），已知简化。
 - **AkShare 版本**：实测 1.17.85；`stock_a_indicator_lg` / `stock_market_pe_lg` 等接口漂移时各函数会降级到 demo/默认值。
 - **数据缓存**：实盘股票列表（24h）、个股 PE/PB 历史（12h，按 symbol 分文件）、市场历史 PE（24h）、国债收益率历史（24h）、行业归属+总股本（720h 月级，按 symbol 分文件）已落盘到 `.cache/`（pickle；取数失败/None 不落盘，避免把瞬时失败固化成空缓存）。离线环境无法验证 TTL 命中/过期行为，缓存正确性留待联网验证。
@@ -198,6 +206,6 @@ Python 3.9+ · akshare · pandas · numpy · matplotlib · scipy（分位数，�
   - **准 PIT**：AkShare 财务/现金流接口返回全历史且常含**重述后**数据，并非严格时点可得。回测按"截止 as-of 日 T"显式截断所有输入序列（`truncate_to_date`），财报另按"报告期 + 披露滞后 120d"过滤（`filter_reports_by_pub_lag`），但无法消除重述偏差——仅为准 PIT 口径，不得宣称"严格历史可得"。
   - **幸存者偏差**：实盘回测标的清单来自当前在市标的（`fetch_stock_list` 即如此），已退市标的不在样本内，系统性高估策略表现。`--backtest-demo` 用模拟数据无此问题但非真实行情。
   - **简化成本**：仅计双边交易费率（`BACKTEST_TXN_COST=0.0005` 单边，换仓 round-trip 2×），未计滑点 / 印花税 / 停牌流动性冲击 / 涨跌停无法成交，净值偏乐观。
-  - `fetch_benchmark_daily`（沪深 300）实盘路径本环境无网未 runtime 验证，需联网复验；离线走 `generate_benchmark_daily` 确定性模拟基准。
+  - `fetch_benchmark_daily`（沪深 300）已迁 Hikyuu 指数 KData（本地，runtime 已验证）；hku 不可用时 fallback AkShare，离线 demo 走 `generate_benchmark_daily` 确定性模拟基准。
 
 > 本工具仅供学习与研究参考，不构成投资建议。

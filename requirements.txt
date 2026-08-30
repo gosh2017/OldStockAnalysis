@@ -9,7 +9,7 @@ tqdm>=4.60            # CLI 批量处理 / 历史回测终端进度条；未安�
 # 可选依赖
 plotly>=5.0           # 交互式估值图 + Web 仪表盘图表
 streamlit>=1.30       # Web 仪表盘（streamlit run app.py）；命令行模式不需要
-hikyuu>=2.8           # 批量筛选数据源（本地库优先，告别实时 HTTP 连不上）；未安装/未导入时自动降级到 None
+hikyuu>=2.8           # 历史/静态数据本地库（日线/财务/现金流/分红/国债/个股PB/行业股本/股票列表/基准指数/批量筛选）；未安装/未导入时自动降级 AkShare。单股历史数据迁移后推荐安装并完成一次性导入（scripts/run_hikyuu_import.py + scripts/import_hikyuu_industry_blocks.py）
 
 # 开发依赖（运行测试时需要）
 pytest>=7.0

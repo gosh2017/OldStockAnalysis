@@ -34,6 +34,23 @@ from .pit import (
     filter_reports_by_pub_lag,
     as_of_bundle,
 )
+from .hikyuu_backend import (
+    fetch_kdata_df as hku_fetch_kdata_df,
+    kdata_to_df as hku_kdata_to_df,
+    hku_sm,
+    hku_stock,
+    hku_index_stock,
+    hku_is_a_share,
+    hku_last_close,
+    hku_total_count_wan,
+    hku_total_shares,
+    hku_industry_name,
+    hku_stock_list,
+    hku_weight_dividends,
+    hku_finance_records,
+    hku_bond_yield_df,
+    hku_pb_series,
+)
 
 __all__ = [
     "fetch_daily_data",
@@ -62,4 +79,17 @@ __all__ = [
     "truncate_to_date",
     "filter_reports_by_pub_lag",
     "as_of_bundle",
+    "hku_fetch_kdata_df",
+    "hku_kdata_to_df",
+    "hku_stock",
+    "hku_index_stock",
+    "hku_is_a_share",
+    "hku_last_close",
+    "hku_total_count_wan",
+    "hku_total_shares",
+    "hku_industry_name",
+    "hku_weight_dividends",
+    "hku_finance_records",
+    "hku_bond_yield_df",
+    "hku_pb_series",
 ]

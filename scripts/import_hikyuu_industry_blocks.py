@@ -36,6 +36,10 @@ import traceback
 
 import requests
 
+# 作为脚本运行（python scripts/import_hikyuu_industry_blocks.py）时 sys.path[0]
+# 是脚本目录，不含项目根；插入根目录以便 probe_calibrate 的 from config import。
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 
 STOCK_DB = r"c:\stock\stock.db"
 
@@ -56,6 +60,11 @@ _HEADERS = {
 _MAX_ATTEMPTS = 8
 _REQ_TIMEOUT = 15
 _CACHE_SEC = 5 * 24 * 60 * 60  # 与 hikyuu is_file_can_download 默认一致
+# 显式禁用代理：requests 默认读 Windows 系统代理（IE/注册表），本机该代理对
+# EM push2 返回 ProxyError（即便无 HTTP_PROXY 环境变量）→ 板块名拉取 8 次重试全败。
+# 禁用后直连可达（实测 total=496 个行业板块）。akshare 的东财端点是另一种故障
+# （RemoteDisconnected），与此处代理无关。
+_NO_PROXY = {"http": None, "https": None}
 
 
 def _get_json_with_retry(url, params, label):
@@ -68,7 +77,7 @@ def _get_json_with_retry(url, params, label):
     for attempt in range(1, _MAX_ATTEMPTS + 1):
         try:
             r = requests.get(url, params=params, headers=_HEADERS,
-                             timeout=_REQ_TIMEOUT)
+                             timeout=_REQ_TIMEOUT, proxies=_NO_PROXY)
             return r.json()
         except Exception as e:  # noqa: BLE001  间歇性故障要吞下重试
             last_err = e
