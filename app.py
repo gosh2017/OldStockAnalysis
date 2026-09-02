@@ -19,6 +19,8 @@ import io
 import json
 import os
 import re
+import threading
+import time
 from contextlib import redirect_stdout
 
 import numpy as np
@@ -84,6 +86,65 @@ def run_backtest_silent(items, *, demo, start, end, on_progress=None, **kwargs):
     with redirect_stdout(buf):
         return run_backtest(items, start=start, end=end, demo=demo,
                             on_progress=on_progress, **kwargs)
+
+
+def _start_job(job_key, target, kwargs, hint):
+    """在后台守护线程中跑长任务（run_batch_silent / run_backtest_silent），进度
+    写进 session_state[job_key] 这个普通 dict（线程内绝不调用 st.* 原语），主脚本
+    随后轮询该 dict 渲染进度、完成后落盘结果。
+
+    为何用后台线程而非同步直跑：批量/回测在线模式逐只联网，多只标的需数分钟。
+    同步阻塞会让 Streamlit 在用户再次点击/切页/断线重连时中止并从头重跑脚本
+    （此时 button=False），导致本次结果丢失、却仍把上一轮 session_state 结果当
+    本次结果渲染——即「只显示前一次排名」。守护线程不随脚本中止而消失，轮询能
+    可靠拿到本次结果。"""
+    job = {
+        "status": "running", "done": 0, "total": 0, "desc": hint,
+        "result": None, "error": None, "hint": hint,
+    }
+    st.session_state[job_key] = job
+
+    def _on_progress(done, total, desc=None):
+        # 由后台线程调用：只更新普通 dict 字段，绝不触碰 st.* 原语
+        job["done"] = done
+        if total:
+            job["total"] = total
+        if desc:
+            job["desc"] = desc
+
+    def _runner():
+        try:
+            job["result"] = target(on_progress=_on_progress, **kwargs)
+            job["status"] = "done"   # 置于 result 之后：主线程看到 done 时 result 已就位
+        except Exception as e:        # 线程内异常不能冒泡到主脚本，记进 job
+            job["error"] = str(e)
+            job["status"] = "error"
+
+    threading.Thread(target=_runner, daemon=True).start()
+
+
+def _poll_job(job_key, result_key, error_label):
+    """轮询 session_state[job_key] 的后台任务：
+      - 进行中：用 st.progress 渲染最新进度，短暂 sleep 后 st.rerun（本帧不会继续往下）；
+      - 失败：st.error 报错并清掉 job；
+      - 完成：把结果搬到 session_state[result_key] 并清掉 job（由调用方随后渲染）。
+    无 job 时直接返回。"""
+    job = st.session_state.get(job_key)
+    if not job:
+        return
+    status = job.get("status")
+    if status == "running":
+        total = job.get("total") or 0
+        frac = min(job.get("done", 0) / total, 1.0) if total else 0.0
+        st.progress(frac, text=job.get("desc") or job.get("hint") or "分析中…")
+        time.sleep(0.4)
+        st.rerun()                   # 重跑以再次轮询；本帧到此中止
+    elif status == "error":
+        st.error(f"{error_label}失败：{job.get('error')}")
+        st.session_state.pop(job_key, None)
+    elif status == "done":
+        st.session_state[result_key] = job.get("result")
+        st.session_state.pop(job_key, None)
 
 
 def _parse_batch_text(text: str) -> list:
@@ -963,27 +1024,24 @@ with tab_batch:
         on_change=_save_dashboard_inputs,
     )
     btn_label = "▶ 运行批量打分" + ("（Demo）" if demo else "（在线逐只联网）")
-    if st.button(btn_label, type="primary"):
+    _batch_running = (st.session_state.get("batch_job") or {}).get("status") == "running"
+    if st.button(btn_label, type="primary", disabled=_batch_running):
         items = _parse_batch_text(batch_text) if batch_text.strip() else BATCH_DEMO_LIST
         if not items:
             st.error("未解析到任何标的，请按每行 `代码,名称` 输入。")
         else:
+            # 先清上一轮结果：后台线程跑到完成前，绝不把旧结果当本次结果展示
+            st.session_state.pop("batch", None)
             _hint = f"批量分析中（{len(items)} 只 · {'Demo' if demo else '在线'}）…"
-            _bar = st.progress(0.0, text=_hint)
-
-            def _on_prog(done, total, desc=None):
-                _bar.progress(min(done / total, 1.0) if total else 0.0,
-                              text=desc or _hint)
-
-            try:
-                st.session_state["batch"] = run_batch_silent(
-                    demo=demo, items=items, on_progress=_on_prog)
-                _bar.progress(1.0, text="批量分析完成")
-            except Exception as e:
-                _bar.empty()
-                st.error(f"批量分析失败：{e}")
+            _start_job("batch_job", run_batch_silent,
+                       dict(demo=demo, items=items), _hint)
+            st.rerun()  # 进入轮询：用 st.progress 渲染后台进度
+    _poll_job("batch_job", "batch", "批量分析")
     if "batch" in st.session_state:
         render_batch(st.session_state["batch"])
+    else:
+        st.info("👈 在左侧添加标的或直接编辑上方清单后点击「▶ 运行批量打分」。"
+                "Demo 模式可即刻离线出结果。")
 
 with tab_backtest:
     st.markdown("验证综合评分信号在历史上是否有效（A/B 级是否跑赢 D 级与基准）。"
@@ -1035,31 +1093,26 @@ with tab_backtest:
         on_change=_save_dashboard_inputs,
     )
     bt_label = "▶ 运行回测" + ("（Demo）" if demo else "（在线逐只联网预取）")
-    if st.button(bt_label, type="primary"):
+    _bt_running = (st.session_state.get("backtest_job") or {}).get("status") == "running"
+    if st.button(bt_label, type="primary", disabled=_bt_running):
         items = _parse_batch_text(bt_text) if bt_text.strip() else BATCH_DEMO_LIST
         if not items:
             st.error("未解析到任何标的，请按每行 `代码,名称` 输入。")
         else:
             start = f"{int(bt_start_year)}0101"
             end = f"{int(bt_end_in)}1231"
+            # 先清上一轮结果，避免展示上一轮回测
+            st.session_state.pop("backtest", None)
             _hint = (f"回测中（{len(items)} 只 · {start}~{end} · freq={freq} · "
                      f"{'Demo' if demo else '在线'}），请稍候…")
-            _bar = st.progress(0.0, text=_hint)
-
-            def _on_prog(done, total, desc=None):
-                _bar.progress(min(done / total, 1.0) if total else 0.0,
-                              text=desc or _hint)
-
-            try:
-                st.session_state["backtest"] = run_backtest_silent(
-                    items, demo=demo, start=start, end=end,
-                    freq=freq, hold_days=hold_days, top_n=top_n,
-                    min_grade=min_grade, weight=weight, txn_cost=txn,
-                    benchmark=BACKTEST_BENCHMARK, on_progress=_on_prog)
-                _bar.progress(1.0, text="回测完成")
-            except Exception as e:
-                _bar.empty()
-                st.error(f"回测失败：{e}")
+            _start_job("backtest_job", run_backtest_silent,
+                       dict(items=items, demo=demo, start=start, end=end,
+                            freq=freq, hold_days=hold_days, top_n=top_n,
+                            min_grade=min_grade, weight=weight, txn_cost=txn,
+                            benchmark=BACKTEST_BENCHMARK),
+                       _hint)
+            st.rerun()
+    _poll_job("backtest_job", "backtest", "回测")
     if "backtest" in st.session_state:
         render_backtest(st.session_state["backtest"])
     else:
