@@ -69,10 +69,11 @@ def run_analysis(symbol, name, demo, fin_start, fin_end):
         return main(ctx, quiet=True)
 
 
-def run_batch_silent(demo=True, items=None, on_progress=None):
+def run_batch_silent(demo=True, items=None, on_progress=None, on_partial=None):
     buf = io.StringIO()
     with redirect_stdout(buf):
-        return run_batch(items or BATCH_DEMO_LIST, demo=demo, on_progress=on_progress)
+        return run_batch(items or BATCH_DEMO_LIST, demo=demo,
+                         on_progress=on_progress, on_partial=on_partial)
 
 
 def run_backtest_silent(items, *, demo, start, end, on_progress=None, **kwargs):
@@ -97,10 +98,14 @@ def _start_job(job_key, target, kwargs, hint):
     同步阻塞会让 Streamlit 在用户再次点击/切页/断线重连时中止并从头重跑脚本
     （此时 button=False），导致本次结果丢失、却仍把上一轮 session_state 结果当
     本次结果渲染——即「只显示前一次排名」。守护线程不随脚本中止而消失，轮询能
-    可靠拿到本次结果。"""
+    可靠拿到本次结果。
+
+    on_partial：某些任务（如 run_batch）可逐份吐出"已完成的中间结果快照"。on_partial
+    回调把快照放进 job["partial"]，使轮询能在任务完成前就向用户展示"已跑到的部分"，
+    即便线程随后异常中断，已展示的成果也不丢。"""
     job = {
         "status": "running", "done": 0, "total": 0, "desc": hint,
-        "result": None, "error": None, "hint": hint,
+        "result": None, "partial": None, "error": None, "hint": hint,
     }
     st.session_state[job_key] = job
 
@@ -112,9 +117,15 @@ def _start_job(job_key, target, kwargs, hint):
         if desc:
             job["desc"] = desc
 
+    def _on_partial(partial_df):
+        # 只存"更好"的一份（行数单调不减）；空 df 忽略
+        if partial_df is not None and len(partial_df) > 0:
+            job["partial"] = partial_df.copy()
+
     def _runner():
         try:
-            job["result"] = target(on_progress=_on_progress, **kwargs)
+            job["result"] = target(on_progress=_on_progress,
+                                   on_partial=_on_partial, **kwargs)
             job["status"] = "done"   # 置于 result 之后：主线程看到 done 时 result 已就位
         except Exception as e:        # 线程内异常不能冒泡到主脚本，记进 job
             job["error"] = str(e)
@@ -123,12 +134,15 @@ def _start_job(job_key, target, kwargs, hint):
     threading.Thread(target=_runner, daemon=True).start()
 
 
-def _poll_job(job_key, result_key, error_label):
+def _poll_job(job_key, result_key, error_label, render_partial=None):
     """轮询 session_state[job_key] 的后台任务：
-      - 进行中：用 st.progress 渲染最新进度，短暂 sleep 后 st.rerun（本帧不会继续往下）；
-      - 失败：st.error 报错并清掉 job；
+      - 进行中：用 st.progress 渲染最新进度，短暂 sleep 后 st.rerun（本帧不继续往下）；
+        若已有 partial 结果，先按 render_partial 呈现"已完成的 N 只"；同时把 partial
+        写入 session_state[result_key]，让本次轮询渲染的"半成品"与最终结果走同一条
+        渲染路径，避免线程中断时丢成果；
+      - 失败：st.warning 报错，但保留已完成的 partial 结果一并展示（而非清掉一切）；
       - 完成：把结果搬到 session_state[result_key] 并清掉 job（由调用方随后渲染）。
-    无 job 时直接返回。"""
+    无 job 时直接返回。render_partial 是可选的 partial 渲染回调（接收 partial_df）。"""
     job = st.session_state.get(job_key)
     if not job:
         return
@@ -136,12 +150,33 @@ def _poll_job(job_key, result_key, error_label):
     if status == "running":
         total = job.get("total") or 0
         frac = min(job.get("done", 0) / total, 1.0) if total else 0.0
-        st.progress(frac, text=job.get("desc") or job.get("hint") or "分析中…")
+        partial = job.get("partial")
+        if partial is not None and len(partial) > 0:
+            # 把最新快照写入 result_key：让下游统一用 render_batch 渲染，
+            # 且在线程异常中断时已展示的成果仍能保留
+            st.session_state[result_key] = partial
+            if render_partial is not None:
+                st.progress(frac, text=f"{job.get('desc') or job.get('hint')}（已出结果 {len(partial)} 只，滚动更新中）")
+                st.caption("⏳ 以下排名为已完成的标的，仍在滚动更新中…")
+            else:
+                st.progress(frac, text=f"{job.get('desc') or job.get('hint')}（已出结果 {len(partial)} 只，滚动更新中）")
+        else:
+            st.progress(frac, text=job.get("desc") or job.get("hint") or "分析中…")
         time.sleep(0.4)
-        st.rerun()                   # 重跑以再次轮询；本帧到此中止
+        st.rerun()
     elif status == "error":
-        st.error(f"{error_label}失败：{job.get('error')}")
         st.session_state.pop(job_key, None)
+        partial = job.get("partial")
+        if partial is not None and len(partial) > 0:
+            st.warning(f"{error_label}出现异常：{job.get('error')}")
+            st.caption(f"⚠️ 以下为异常发生前已完成的 {len(partial)} 只标的")
+            if render_partial is not None:
+                render_partial(partial)
+            else:
+                # 没有专用渲染时，直接写入 result_key 让下游统一渲染
+                st.session_state[result_key] = partial
+        else:
+            st.error(f"{error_label}失败：{job.get('error')}")
     elif status == "done":
         st.session_state[result_key] = job.get("result")
         st.session_state.pop(job_key, None)

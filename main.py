@@ -291,18 +291,31 @@ def _read_batch_file(path: str) -> list:
 
 
 def run_batch(items: list, demo: bool = False, years=None,
-              on_progress=None) -> pd.DataFrame:
+              on_progress=None, on_partial=None) -> pd.DataFrame:
     """对多只标的逐只执行分析并按综合评分排名。
 
     years: 可选 (起始年, 结束年)，覆盖 config 默认基本面年份区间。
     on_progress: 可选回调 (done, total, desc)，逐只上报进度。CLI 由 _cli 包一层
         tqdm Progress；Streamlit 仪表盘传 st.progress 闭包；None 时不报。
+    on_partial: 可选回调 (partial_df)，每只标的完成后把「已完成的排名快照」
+        传出去，供仪表盘/调用方渐进展示——避免整批跑完前用户只能看到空白，也
+        在后台线程异常中断时保住已完成的成果（见"批量分析到 150 只后无结果"
+        问题）。None 时不报。
     """
     mode = "demo" if demo else "live"
     print(f"\n{'=' * 70}\n  批量选股打分（{len(items)} 只标的 · {mode} 模式）\n{'=' * 70}")
 
     rows = []
     n = len(items)
+
+    def _emit_partial():
+        if on_partial is not None and rows:
+            df = pd.DataFrame(rows).sort_values("评分", ascending=False).reset_index(drop=True)
+            try:
+                on_partial(df)
+            except Exception:
+                pass
+
     for i, (symbol, name) in enumerate(items):
         # 逐只上报进度：done=i（已完成 i 只），desc 标注当前标的；done/total 严格对齐
         if on_progress:
@@ -328,6 +341,7 @@ def run_batch(items: list, demo: bool = False, years=None,
         except Exception as e:  # 单只失败不影响整体批量
             rows.append({"代码": symbol, "名称": name, "评分": 0.0, "等级": "-",
                          "完整度": "-", "基本面": "错误", "建议": f"出错:{e}"})
+        _emit_partial()
     if on_progress:
         on_progress(n, n, "批量分析完成")
 
