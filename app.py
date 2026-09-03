@@ -78,12 +78,15 @@ def run_batch_silent(demo=True, items=None, on_progress=None, on_partial=None,
                          per_stock_timeout=per_stock_timeout, resume=resume)
 
 
-def run_backtest_silent(items, *, demo, start, end, on_progress=None, **kwargs):
+def run_backtest_silent(items, *, demo, start, end, on_progress=None,
+                        on_partial=None, **kwargs):
     """静默执行回测（复用 analysis.run_backtest），返回 BacktestResult。
 
     kwargs 透传 run_backtest 的 freq/hold_days/top_n/min_grade/weight/txn_cost/benchmark。
     demo 走 generate_all_demo_data(backtest=True) 全程无网；live 需联网预取。
     on_progress 透传给 run_backtest，供仪表盘 st.progress 实时渲染两阶段进度。
+    on_partial 由 _start_job 统一传入（回测不支持 partial 快照，此处接收并忽略，
+    仅使签名与 run_batch_silent 对齐，便于 _start_job 用通用方式分发）。
     """
     buf = io.StringIO()
     with redirect_stdout(buf):
