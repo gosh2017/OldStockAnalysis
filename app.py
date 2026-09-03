@@ -69,11 +69,13 @@ def run_analysis(symbol, name, demo, fin_start, fin_end):
         return main(ctx, quiet=True)
 
 
-def run_batch_silent(demo=True, items=None, on_progress=None, on_partial=None):
+def run_batch_silent(demo=True, items=None, on_progress=None, on_partial=None,
+                     per_stock_timeout=None, resume=True):
     buf = io.StringIO()
     with redirect_stdout(buf):
         return run_batch(items or BATCH_DEMO_LIST, demo=demo,
-                         on_progress=on_progress, on_partial=on_partial)
+                         on_progress=on_progress, on_partial=on_partial,
+                         per_stock_timeout=per_stock_timeout, resume=resume)
 
 
 def run_backtest_silent(items, *, demo, start, end, on_progress=None, **kwargs):
@@ -1099,7 +1101,7 @@ with tab_batch:
             st.session_state.pop("batch", None)
             _hint = f"批量分析中（{len(items)} 只 · {'Demo' if demo else '在线'}）…"
             _start_job("batch_job", run_batch_silent,
-                       dict(demo=demo, items=items), _hint)
+                       dict(demo=demo, items=items, resume=True), _hint)
             st.rerun()  # 进入轮询：用 st.progress 渲染后台进度
     _poll_job("batch_job", "batch", "批量分析")
     if "batch" in st.session_state:

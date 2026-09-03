@@ -17,8 +17,10 @@
 """
 import argparse
 import io
+import os
 import re
 import sys
+import threading
 import unicodedata
 from contextlib import redirect_stdout
 from datetime import datetime
@@ -69,6 +71,15 @@ from visualization import (
     plot_drawdown,
     plot_grade_forward_returns,
 )
+
+
+# -- 批量排名韧性参数 ------------------------------------
+# 单只标的的最长分析时长（秒）。超过即判"超时"并跳过（记 0 分/错误），避免
+# 某只标的把整批挂死、间接导致 Streamlit 子进程被回收、连带 session_state
+# 和已完成的 partial 一并丢失（见"批量分析到 150 只后无结果"问题）。
+BATCH_PER_STOCK_TIMEOUT = 60
+# partial df 落盘路径（进程重生恢复用）。.cache/ 已在 .gitignore。
+BATCH_PARTIAL_PKL = os.path.join(".cache", "batch_partial.pkl")
 
 
 def main(ctx: StockContext, *, quiet: bool = False) -> dict:
@@ -291,7 +302,10 @@ def _read_batch_file(path: str) -> list:
 
 
 def run_batch(items: list, demo: bool = False, years=None,
-              on_progress=None, on_partial=None) -> pd.DataFrame:
+              on_progress=None, on_partial=None,
+              partial_path: str | None = None,
+              per_stock_timeout: int | None = None,
+              resume: bool = False) -> pd.DataFrame:
     """对多只标的逐只执行分析并按综合评分排名。
 
     years: 可选 (起始年, 结束年)，覆盖 config 默认基本面年份区间。
@@ -301,44 +315,106 @@ def run_batch(items: list, demo: bool = False, years=None,
         传出去，供仪表盘/调用方渐进展示——避免整批跑完前用户只能看到空白，也
         在后台线程异常中断时保住已完成的成果（见"批量分析到 150 只后无结果"
         问题）。None 时不报。
+    partial_path: partial df 的落盘路径（进程重生恢复用）。默认 BATCH_PARTIAL_PKL。
+    per_stock_timeout: 单只标的最长分析秒数，默认 BATCH_PER_STOCK_TIMEOUT。
+        超时则该行记"错误:超时"，不影响后续标的。
+    resume: True 时从 partial_path 读回上次已成功完成的部分直接复用（断点续跑），
+        仅重跑未完成/出错的标的；已完成的不再重算。False 时按顺序跑满全部。
     """
     mode = "demo" if demo else "live"
     print(f"\n{'=' * 70}\n  批量选股打分（{len(items)} 只标的 · {mode} 模式）\n{'=' * 70}")
 
     rows = []
     n = len(items)
+    timeout = per_stock_timeout if per_stock_timeout is not None else BATCH_PER_STOCK_TIMEOUT
+    pkl_path = partial_path or BATCH_PARTIAL_PKL
+
+    # 断点续跑：从落盘 partial 复用已成功完成（建议为真实建议、非出错/超时）的标的，
+    # 避免重跑、快速恢复进度，也防止同一只标重复占用内存把进程推高
+    _resume_done = set()
+    if resume and os.path.exists(pkl_path):
+        try:
+            _pk = pd.read_pickle(pkl_path)
+            if isinstance(_pk, pd.DataFrame) and not _pk.empty and {"代码", "名称", "评分", "建议"}.issubset(_pk.columns):
+                _bad = {"N/A", "-"}
+                def _is_ok(s):
+                    s = str(s)
+                    return s not in _bad and not s.startswith("出错")
+                _ok = _pk[_pk["建议"].apply(_is_ok)]
+                for _, _r in _ok.iterrows():
+                    _code = str(_r["代码"])
+                    rows.append({
+                        "代码": _code, "名称": str(_r["名称"]),
+                        "评分": float(_r["评分"]), "等级": str(_r.get("等级", "-")),
+                        "完整度": str(_r.get("完整度", "-")),
+                        "基本面": str(_r.get("基本面", "-")),
+                        "建议": str(_r["建议"]),
+                    })
+                    _resume_done.add(_code)
+                if _resume_done:
+                    print(f"  [断点续跑] 复用上次已完成的 {len(_resume_done)} 只标的")
+        except Exception:
+            pass
 
     def _emit_partial():
-        if on_partial is not None and rows:
+        if rows:
             df = pd.DataFrame(rows).sort_values("评分", ascending=False).reset_index(drop=True)
+            if on_partial is not None:
+                try:
+                    on_partial(df)
+                except Exception:
+                    pass
+            # 落盘：进程重生恢复 + 双保险（即使 app 侧写盘没跑也保住成果）
             try:
-                on_partial(df)
+                os.makedirs(os.path.dirname(pkl_path) or ".", exist_ok=True)
+                df.to_pickle(pkl_path)
             except Exception:
                 pass
 
     for i, (symbol, name) in enumerate(items):
-        # 逐只上报进度：done=i（已完成 i 只），desc 标注当前标的；done/total 严格对齐
         if on_progress:
             on_progress(i, n, f"批量分析 {i + 1}/{n} · {name}")
-        # 批量模式抑制图表与逐只步骤打印，静默分析后仅汇总排名
+        if str(symbol) in _resume_done:
+            _emit_partial()
+            continue
         ctx_kwargs = dict(symbol=symbol, name=name, demo=demo, no_chart=True)
         if years:
             ctx_kwargs["fin_start"], ctx_kwargs["fin_end"] = years
         ctx = StockContext(**ctx_kwargs)
+
         try:
-            buf = io.StringIO()
-            with redirect_stdout(buf):
-                res = main(ctx, quiet=True)
-            sc = res.get("score", {}) or {}
-            adv = res.get("advice", {}) or {}
-            rows.append({
-                "代码": symbol, "名称": name,
-                "评分": sc.get("score", 0.0), "等级": sc.get("grade", "-"),
-                "完整度": f"{sc.get('completeness_tag', '-')}({sc.get('completeness', 0):.0f})",
-                "基本面": "通过" if sc.get("screened") else "未通过",
-                "建议": adv.get("recommendation", "N/A"),
-            })
-        except Exception as e:  # 单只失败不影响整体批量
+            _slot = {}
+            def _target():
+                try:
+                    _slot["value"] = main(ctx, quiet=True)
+                except Exception as e:
+                    _slot["exc"] = e
+            worker = threading.Thread(target=_target, daemon=True)
+            worker.start()
+            worker.join(timeout=timeout)
+
+            if worker.is_alive():
+                # 超时：线程仍在跑，标记超时并继续（不能 join 死等，否则违背超时语义）
+                rows.append({"代码": symbol, "名称": name, "评分": 0.0, "等级": "-",
+                             "完整度": "-", "基本面": "错误:超时", "建议": "N/A"})
+                print(f"  [X] {symbol} {name} 分析超时（>{timeout}s），跳过")
+            elif "exc" in _slot:
+                rows.append({"代码": symbol, "名称": name, "评分": 0.0, "等级": "-",
+                             "完整度": "-", "基本面": "错误",
+                             "建议": f"出错:{_slot['exc']}"})
+            else:
+                res = _slot.get("value")
+                sc = (res or {}).get("score", {}) or {}
+                adv = (res or {}).get("advice", {}) or {}
+                rows.append({
+                    "代码": symbol, "名称": name,
+                    "评分": sc.get("score", 0.0), "等级": sc.get("grade", "-"),
+                    "完整度": f"{sc.get('completeness_tag', '-')}({sc.get('completeness', 0):.0f})",
+                    "基本面": "通过" if sc.get("screened") else "未通过",
+                    "建议": adv.get("recommendation", "N/A"),
+                })
+        except Exception as e:
+            # 兜底兜底：线程机制本身出问题也不断整批
             rows.append({"代码": symbol, "名称": name, "评分": 0.0, "等级": "-",
                          "完整度": "-", "基本面": "错误", "建议": f"出错:{e}"})
         _emit_partial()
