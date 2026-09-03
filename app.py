@@ -182,6 +182,32 @@ def _poll_job(job_key, result_key, error_label, render_partial=None):
         st.session_state.pop(job_key, None)
 
 
+def _recover_batch_partial():
+    """从落盘 partial 恢复上次被进程中断的批量结果（main.run_batch 的 partial_path 写盘）。
+
+    仅在「无活跃 batch_job 且本次尚未出结果」时恢复一次，避免与新启动的运行
+    抢写。new run 开始时（tab_batch 处）会 pop "batch" 并启动新 job，本函数
+    因检测到活跃 job 而跳过，不会用旧落盘覆盖新运行。"""
+    if st.session_state.get("batch_job"):
+        return
+    if "batch" in st.session_state:
+        return
+    try:
+        from main import BATCH_PARTIAL_PKL as _pkl
+        if not os.path.exists(_pkl):
+            return
+        df = pd.read_pickle(_pkl)
+        if not isinstance(df, pd.DataFrame) or df.empty:
+            return
+        expected = {"代码", "名称", "评分", "等级", "完整度", "基本面", "建议"}
+        if not expected.issubset(set(df.columns)):
+            return
+        st.session_state["batch"] = df
+        st.session_state["_batch_recovered"] = True
+    except Exception:
+        pass
+
+
 def _parse_batch_text(text: str) -> list:
     """解析批量标的文本：每行 `代码,名称` 或仅代码（# 注释、空行跳过）。
     返回 [(code, name), ...]。复用 main._read_batch_file 的分割逻辑。"""
@@ -1048,9 +1074,13 @@ with tab_screen:
     _render_screening_tab(demo)
 
 with tab_batch:
+    _recover_batch_partial()
     st.markdown("对多只标的逐只打分并按综合评分排序。")
     st.caption("当前模式：" + ("Demo（离线模拟数据）" if demo else "在线（逐只联网分析，较慢）")
                + "。可在左侧栏切换 Demo 模式；左侧栏搜索后可直接添加至本清单，或在此手动编辑。")
+    if st.session_state.pop("_batch_recovered", False):
+        st.success("📦 已恢复上次中断前已完成的批量结果（进程中断时落盘成果不丢）。"
+                   "点击下方按钮可基于当前清单重新运行。")
     batch_text = st.text_area(
         "批量标的（每行 `代码,名称` 或仅 `代码`；留空用内置清单）",
         key="batch_symbols", height=120,
