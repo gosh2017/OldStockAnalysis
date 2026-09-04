@@ -137,8 +137,17 @@ def fundamental_screening(
 
     # -- 判断是否通过筛选 --
     roe_series = result_df["ROE(%)"].dropna()
-    # item A1：missing 年股息率存 0.0，按"分红来源"显式排除无数据年，不污染中位数/覆盖计数
-    div_series = result_df.loc[result_df["分红来源"] != "missing", "股息率(%)"].dropna()
+    # 仅"real"来源（实际每股分红 / 年末股价）参与 div_pass 判定；
+    # estimated_roe / estimated_np 是行业分红率假设凑出的估算值，可展示但不参与筛选，
+    # 避免从未分红的次新股靠行业模板被误判为"高股息"而通过。
+    # missing 年股息率存 0.0，同样排除。
+    div_series = result_df.loc[result_df["分红来源"] == "real", "股息率(%)"].dropna()
+
+    _est_mask = result_df["分红来源"].isin(["estimated_roe", "estimated_np"])
+    _est_years = result_df.loc[_est_mask, "年份"].tolist()
+    if _est_years:
+        print(f"  [!] 以下年份股息率为估算值（{', '.join(_est_mask[_est_mask].map(lambda x: x).unique())}），"
+              f"仅展示不参与筛选：{_est_years}")
 
     # 中位数口径：允许个别异常年，避免"全部达标"误杀稳健蓝筹。
     # 三条件：覆盖年数 ≥ MIN_COVERAGE_YEARS、中位数 > 阈值、达标年数 ≥ MIN_PASSING_YEARS。
@@ -154,7 +163,7 @@ def fundamental_screening(
     )
 
     print(f"\n  -- 筛选判断（达标线: ROE>{ROE_THRESHOLD:.0f}%, 股息率>{DIV_THRESHOLD:.0f}%；"
-          f"中位数达标 + ≥{MIN_PASSING_YEARS} 年达标 + 覆盖 ≥{MIN_COVERAGE_YEARS} 年）--")
+          f"股息率仅取 real 来源；中位数达标 + ≥{MIN_PASSING_YEARS} 年达标 + 覆盖 ≥{MIN_COVERAGE_YEARS} 年）--")
     if len(roe_series) > 0:
         print(f"  - ROE > {ROE_THRESHOLD:.0f}%：{'[PASS] 通过' if roe_pass else '[FAIL] 未通过'}"
               f"  (中位数 {roe_series.median():.1f}%，{(roe_series > ROE_THRESHOLD).sum()}/{len(roe_series)} 年达标，"
