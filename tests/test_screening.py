@@ -90,8 +90,30 @@ def test_dividend_source_column(ctx, fin_abstract, daily_df, dividend_df):
     assert "分红来源" in tbl.columns
     # 列名不含"股息"子串，避免 scoring 的 col("股息率") 误匹配
     assert "股息" not in "分红来源"
-    # demo dividend_df 含"派息"列、daily_df 含年末收盘价 → 至少一年走 real
-    assert (tbl["分红来源"] == "real").any()
+    # demo dividend_df 含"派息"列、daily_df 含年末收盘价 → 5 年全部走 real
+    # （.all() 而非 .any()：全部为 real 才有资格支撑 div_pass 判定）
+    assert (tbl["分红来源"] == "real").all()
+
+
+def test_estimated_dividends_dont_pass_screen(ctx, fin_abstract, daily_df, monkeypatch):
+    """回归：无分红记录时股息率走 estimated_roe/np 估算路径，**不参与** div_pass 判定。
+
+    用"消费"桶（payout_ratio 0.40）把估算股息率推到 ~4.8%，远超 DIV_THRESHOLD=2%——
+    旧逻辑（排除 missing 即计入）会因此通过筛选，使从未分红的次新股被误判为高股息。
+    修复后估算值仅展示于表中，div_pass 恒为 False（无 real 数据 = 股息率数据不足）。
+    """
+    monkeypatch.setattr(s1, "DIV_THRESHOLD", 2.0)
+    # 清空分红记录 → 方案1 全失，全部落入估算路径
+    res = fundamental_screening(ctx.symbol, fin_abstract, daily_df,
+                                 pd.DataFrame(), bucket="消费", market_pe=25.0)
+    tbl = res["table"]
+    # 表里仍有估算值（展示不丢）
+    est = tbl.loc[tbl["分红来源"].isin(["estimated_roe", "estimated_np"]), "股息率(%)"]
+    assert not est.empty
+    assert est.median() > 2.0          # 估算值确实远超阈值——旧逻辑会误通过
+    # 但筛选不认估算
+    assert res["div_pass"] is False
+    assert res["screened"] is False
 
 
 def test_estimate_dividend_yield_returns_tuple(ctx, fin_abstract, daily_df, dividend_df):

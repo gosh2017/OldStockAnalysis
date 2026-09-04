@@ -146,7 +146,9 @@ def fundamental_screening(
     _est_mask = result_df["分红来源"].isin(["estimated_roe", "estimated_np"])
     _est_years = result_df.loc[_est_mask, "年份"].tolist()
     if _est_years:
-        print(f"  [!] 以下年份股息率为估算值（{', '.join(_est_mask[_est_mask].map(lambda x: x).unique())}），"
+        _est_sources = ", ".join(
+            sorted(result_df.loc[_est_mask, "分红来源"].astype(str).unique()))
+        print(f"  [!] 以下年份股息率为估算值（{_est_sources}），"
               f"仅展示不参与筛选：{_est_years}")
 
     # 中位数口径：允许个别异常年，避免"全部达标"误杀稳健蓝筹。
