@@ -516,3 +516,101 @@ def test_hikyuu_fetch_returns_none_when_db_not_loaded(monkeypatch):
     fake.load_hikyuu.side_effect = RuntimeError("no such table: block")
     monkeypatch.setitem(sys.modules, "hikyuu", fake)
     assert fetcher._fetch_stock_screening_data_hikyuu() is None
+
+
+# -- 申万一级兜底单元测试 -------------------------------------------
+# Hikyuu 本地「行业板块」仅 19/496 → 批量筛选约 80% 股票行业为 None。
+# _fetch_sw_industry_map 截 .SI 后缀 + _apply_sw_industry_fallback 补缺失项，
+# 以下用例坐实截后缀修复与兜底填充语义（纯函数，无网络）。
+
+import pandas as pd  # noqa: E402  顶部已 import，此处防重排误删
+
+
+def test_sw_bare_code_strips_si_suffix():
+    """_sw_bare_code 去 .SI 后缀；裸码/None/空串安全。"""
+    from data.fetcher import _sw_bare_code
+    assert _sw_bare_code("801780.SI") == "801780"
+    assert _sw_bare_code("801010.SI") == "801010"
+    assert _sw_bare_code("801780") == "801780"     # 已裸码不变
+    assert _sw_bare_code(None) == ""               # None → 空（调用方跳过）
+    assert _sw_bare_code("") == ""
+    assert _sw_bare_code("  801780.SI  ") == "801780"   # strip 空白
+
+
+def test_apply_sw_fallback_fills_missing_preserves_local():
+    """缺失项用申万补齐，本地已有行业保留（本地优先），桶重算。"""
+    from data.fetcher import _apply_sw_industry_fallback, map_to_industry_bucket
+    df = pd.DataFrame({
+        "代码": ["000001", "600000", "300750", "688981"],
+        "名称": ["A", "B", "C", "D"],
+        "总市值": [1e10, 2e10, 3e10, 4e10],
+        "行业": [None, "银行", None, "半导体"],   # 本地有：600000 银行、688981 半导体
+        "桶": ["其他", "银行", "其他", "成长"],
+    })
+    sw_map = {"000001": "银行", "300750": "电气设备"}  # 688981 不在申万映射
+    out = _apply_sw_industry_fallback(df.copy(), sw_map)
+    # 缺失项补齐
+    assert out.loc[0, "行业"] == "银行"           # 000001 ← 申万补
+    assert out.loc[2, "行业"] == "电气设备"      # 300750 ← 申万补
+    # 本地已有保留（不被申万覆盖）
+    assert out.loc[1, "行业"] == "银行"           # 600000 本地保留
+    assert out.loc[3, "行业"] == "半导体"        # 688981 本地保留
+    # 桶重算（补齐行归位；本地行桶不变）
+    assert out["桶"].tolist() == ["银行", "银行", "成长", "成长"]
+    # map_to_industry_bucket 与兜底桶口径一致
+    assert (out["桶"] == out["行业"].apply(map_to_industry_bucket)).all()
+
+
+def test_apply_sw_fallback_empty_map_is_noop():
+    """申万映射为空（端点失败）→ df 原样，不抛错。"""
+    from data.fetcher import _apply_sw_industry_fallback
+    df = pd.DataFrame({"代码": ["000001"], "行业": [None], "桶": ["其他"]})
+    out = _apply_sw_industry_fallback(df.copy(), {})
+    pd.testing.assert_frame_equal(out, df)
+
+
+def test_apply_sw_fallback_no_industry_col_is_noop():
+    """df 无「行业」列 → 原样返回不抛错（防御降级路径）。"""
+    from data.fetcher import _apply_sw_industry_fallback
+    df = pd.DataFrame({"代码": ["000001"], "名称": ["A"]})
+    out = _apply_sw_industry_fallback(df.copy(), {"000001": "银行"})
+    pd.testing.assert_frame_equal(out, df)
+
+
+def test_fetch_sw_industry_map_passes_bare_code(monkeypatch):
+    """_fetch_sw_industry_map 传给 index_component_sw 的 symbol 必为裸码（无 .SI）。
+
+    回归根因：申万 component_stocks 端点只认裸码，带 .SI 后缀返空 KeyError，
+    旧代码直接传 first_df 的行业代码（带 .SI）→ 31 行业全失败、mapping 恒空。
+    截后缀修复后须保证传入 symbol 不含 .SI。
+    """
+    import data.fetcher as fetcher
+
+    seen_symbols = []
+
+    def fake_first():
+        return pd.DataFrame({
+            "行业代码": ["801010.SI", "801030.SI"],
+            "行业名称": ["农林牧渔", "基础化工"],
+            "成份个数": [104, 411],
+        })
+
+    def fake_comp(symbol, *args, **kwargs):
+        seen_symbols.append(symbol)
+        assert ".SI" not in symbol, f"必须传裸码，实际传 {symbol!r}"
+        # 每行业返回该行业专属代码（避免跨行业覆盖），6 位股票代码
+        codes = ["000505", "000592"] if symbol == "801010" else ["600001", "600002"]
+        return pd.DataFrame({"证券代码": codes, "证券名称": ["A", "B"]})
+
+    monkeypatch.setattr(fetcher.ak, "sw_index_first_info", fake_first)
+    monkeypatch.setattr(fetcher.ak, "index_component_sw", fake_comp)
+    m = fetcher._fetch_sw_industry_map()
+    # 两行业均被调，symbol 均裸码
+    assert seen_symbols == ["801010", "801030"]
+    # 成份股入映射，各自归属正确行业
+    assert m["000505"] == "农林牧渔"
+    assert m["000592"] == "农林牧渔"
+    assert m["600001"] == "基础化工"
+    assert m["600002"] == "基础化工"
+    assert len(m) == 4
+

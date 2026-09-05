@@ -997,9 +997,41 @@ def _fetch_stock_screening_data_hikyuu(on_progress=None) -> pd.DataFrame | None:
         print(f"      请跑：python scripts/import_hikyuu_industry_blocks.py  "
               "（一次性，~10-30min，仅导入期触网），之后重开批量筛选。")
     else:
-        msg = (f"[OK] 批量筛选表(Hikyuu): {len(df)} 只，{have_ind} 只有行业归属，"
-               f"总市值有效 {have_cap} 只")
-        print(msg)
+        print(f"[OK] 批量筛选表(Hikyuu): {len(df)} 只，本地行业归属 {have_ind} 只，"
+              f"总市值有效 {have_cap} 只")
+
+    # --- 申万一级兜底：本地「行业板块」仅 19/496（东财 push2 端点间歇性只拉到
+    # 19 个）→ 约 80% 股票行业为 None。用申万一级成份股映射补齐缺失项（本地优
+    # 先，不覆盖）。申万端点截后缀后稳定（31 行业 ~5223 只全覆盖，实测），随 df
+    # 落盘 24h 缓存。失败（端点不通 / akshare 缺函数）→ sw_map={}，df 维持本地
+    # 行业，不阻断、仅降级。---
+    if have_ind < len(df):
+        miss = len(df) - have_ind
+        print(f"[INFO] 行业本地缺失 {miss} 只，启动申万一级兜底"
+              f"（31 行业，截后缀后稳定，日级缓存）…")
+        _hku_total = total
+
+        def _sw_prog(done, sw_total, desc=None):
+            # 申万进度续在 Hikyuu 取数之后，避免进度条倒回（Hikyuu 已占
+            # _hku_total 步，申万 sw_total 步续在其后，分母随阶段扩容）
+            if on_progress is not None:
+                try:
+                    on_progress(_hku_total + done, _hku_total + sw_total,
+                                desc or f"申万兜底 {done}/{sw_total}")
+                except Exception:
+                    pass
+
+        sw_map = _fetch_sw_industry_map(_sw_prog)
+        if sw_map:
+            before = have_ind
+            df = _apply_sw_industry_fallback(df, sw_map)
+            have_ind = int(df["行业"].notna().sum())
+            print(f"  [OK] 申万兜底补齐 {have_ind - before} 只缺失行业，"
+                  f"行业覆盖 {have_ind}/{len(df)} 只")
+        else:
+            print("  [!] 申万一级兜底拉取失败（端点不通 / akshare 缺函数），"
+                  f"行业归属维持本地 {have_ind}/{len(df)} 只，桶列仍按本地归位")
+
     return df
 
 
@@ -1055,10 +1087,42 @@ def _fetch_stock_screening_data_live(on_progress=None) -> pd.DataFrame | None:
     return df
 
 
+def _sw_bare_code(code: str) -> str:
+    """申万一级行业代码去 .SI 后缀：801780.SI → 801780，801780 → 801780。
+
+    申万 component_stocks 端点只认裸码——带 .SI 后缀返回空 results，akshare
+    在列选择处抛 KeyError("证券代码… not in index")（实测 akshare 1.17.85：
+    裸码 801010 返 104 只成份股，带后缀 801010.SI 必抛 KeyError）。故拉成份
+    股前必须截后缀。None / 空串返回空串（调用方跳过）。
+    """
+    if not code:
+        return ""
+    return str(code).strip().split(".")[0]
+
+
+def _apply_sw_industry_fallback(df: pd.DataFrame, sw_map: dict) -> pd.DataFrame:
+    """用申万一级映射补齐 df 中本地行业缺失的行（不覆盖本地已有，本地优先）。
+
+    Hikyuu 本地「行业板块」仅 19/496 个板块（东财 push2 端点间歇性只拉到 19
+    个）→ 批量筛选表约 80% 股票行业为 None。本函数对「行业」为 NaN 的行用申万
+    一级 sw_map（代码→申万一级行业名）补齐，已有行业保留（口径混合可接受，
+    桶映射均正确）；补齐后重算「桶」列。sw_map 为空 / 无「行业」列 → 原样返回。
+    """
+    if not sw_map or "行业" not in df.columns:
+        return df
+    miss = df["行业"].isna()
+    if miss.any():
+        df.loc[miss, "行业"] = df.loc[miss, "代码"].map(sw_map)
+    # 桶统一按（可能补齐后的）行业重算——本地已有行桶不变，补齐行桶归位
+    df["桶"] = df["行业"].apply(map_to_industry_bucket)
+    return df
+
+
 def _fetch_sw_industry_map(on_progress=None) -> dict:
     """
     构建 代码 → 申万一级行业名 映射。数据源：sw_index_first_info 取 31 个
-    一级行业代码+名称，index_component_sw 逐行业拉成份股。任一环节失败返回 {}
+    一级行业代码+名称，index_component_sw 逐行业拉成份股（**传裸码**，截 .SI
+    后缀——带后缀返空 KeyError，见 _sw_bare_code）。任一环节失败返回 {}
     （调用方按市值区间降级筛选）。on_progress(done, total, desc) 回报循环进度。
     """
     fn_first = getattr(ak, "sw_index_first_info", None)
@@ -1087,7 +1151,9 @@ def _fetch_sw_industry_map(on_progress=None) -> dict:
     total = len(industries)
     mapping: dict = {}
     for i, (ind_code, ind_name) in enumerate(industries):
-        comp = try_fetch(fn_comp, symbol=ind_code)
+        # 申万 component_stocks 端点只认裸码：801780.SI → 801780（带后缀返空
+        # KeyError，实测 akshare 1.17.85），截后缀后 31 行业 ~5223 只全覆盖。
+        comp = try_fetch(fn_comp, symbol=_sw_bare_code(ind_code))
         n = 0
         if comp is not None and not comp.empty:
             sc = find_col_in(["证券代码", "代码", "stockcode"], comp)

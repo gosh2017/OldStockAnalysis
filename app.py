@@ -357,14 +357,14 @@ def _render_screening_tab(demo: bool):
                 st.session_state.pop("screening_err", None)
                 _bar.progress(1.0, text="筛选表加载完成")
             else:
-                # fetch_stock_screening_data 在 akshare 返回空/超时时静默返回 None
+                # fetch_stock_screening_data 在 Hikyuu 本地库未装/未导入时静默返回 None
                 # （不抛异常），需在此显式判定失败态：给出可操作的错误，而非误报
                 # 「完成」、又回落到"点击加载"引导——那会让用户看到"完成"却无表。
                 _bar.empty()
                 if _err is None:
-                    _err = ("筛选表加载失败：未能获取实时行情数据（akshare 返回空或"
-                            "超时，需联网拉取全市场市值 + 31 个申万一级行业成份股）。"
-                            "可在左侧栏勾选 Demo 模式离线预览，或稍后点「🔄 刷新」重试。")
+                    _err = ("筛选表加载失败：未能加载 Hikyuu 本地库（hikyuu 未安装或"
+                            "本地数据未导入）。可先跑 python scripts/run_hikyuu_import.py "
+                            "导入数据，或在左侧栏勾选 Demo 模式离线预览，或稍后点「🔄 刷新」重试。")
                 st.session_state["screening_err"] = _err
                 # 失败时不覆盖 screening_df：保留上一次成功结果，由下游渲染旧表 +
                 # 警告（避免刷新失败把已加载的表也清掉）。
@@ -847,6 +847,42 @@ def render_batch(df):
                       xaxis_title="标的", height=360, showlegend=False, margin=dict(t=10))
     st.plotly_chart(fig, use_container_width=True)
     st.success(f"★ 推荐重点关注（评分前 3）：{', '.join(df.head(3)['名称'])}")
+
+    # 一键将评分靠前的标的加入「历史回测」清单：复用 _append_pairs_to_input，
+    # 与「批量筛选」加入回测、侧边栏单只「➕」同口径（按 `代码,名称` 去重 + 落盘）。
+    if not df.empty:
+        st.markdown("---")
+        st.markdown("##### 一键加入「历史回测」清单")
+        _c_topn, _c_btn = st.columns([1, 2])
+        with _c_topn:
+            _topn = st.number_input(
+                "取评分前 N 只", min_value=1, max_value=len(df),
+                value=min(5, len(df)), step=1, key="_batch_topn_to_bt",
+                help="按综合评分从高到低取前 N 只，加入「历史回测」tab 的标的清单。")
+        with _c_btn:
+            st.write("")  # 占位：使按钮与左侧输入框底部对齐
+            if st.button("➕ 加入历史回测清单", type="primary",
+                         use_container_width=True):
+                _head = df.head(int(_topn))
+                _pairs = list(zip(_head["代码"].astype(str),
+                                  _head["名称"].astype(str)))
+                _n = _append_pairs_to_input("bt_symbols", _pairs)
+                if _n:
+                    st.session_state["_batch_to_bt_feedback"] = (
+                        "success",
+                        f"已将评分前 {int(_topn)} 名中的 {_n} 只加入"
+                        f"「历史回测」清单（去重后新增）。请到「历史回测」tab 查看。")
+                    st.rerun()
+                else:
+                    st.info("所选标的均已在「历史回测」清单中。")
+
+        # 跨 rerun 重放反馈：append + st.rerun() 会冲掉当帧提示，
+        # 故写标志、于重跑帧在此重放（与「批量筛选」tab 同一手法）。
+        _fb = st.session_state.pop("_batch_to_bt_feedback", None)
+        if _fb:
+            _kind, _msg = _fb
+            if _kind == "success":
+                st.success(_msg)
 
 
 # -- 渲染：历史回测 ---------------------------------------

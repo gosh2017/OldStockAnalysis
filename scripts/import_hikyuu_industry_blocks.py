@@ -37,7 +37,29 @@ import traceback
 import requests
 
 
-STOCK_DB = r"c:\stock\stock.db"
+def _resolve_hku_db_path() -> str:
+    """从 ~/.hikyuu/hikyuu.ini 读 hikyuu 实际加载的 sqlite DB 路径。
+
+    旧硬编码 c:\\stock\\stock.db 在本机不存在——hikyuu ini 指向
+    G:/QTrading/StockData/stock.db，入库必须写这个 DB，否则查询期
+    get_belong_to_block_list 读不到行业板块（入库与查询落在两个 DB）。
+    取 ini 首个含 db 选项的 section；读不到时 fallback 到本机实测路径。
+    """
+    import configparser
+    import os
+    ini = os.path.expanduser("~/.hikyuu/hikyuu.ini")
+    try:
+        cp = configparser.ConfigParser()
+        cp.read(ini, encoding="utf-8")
+        for sec in cp.sections():
+            if cp.has_option(sec, "db"):
+                return cp.get(sec, "db").replace("\\", "/")
+    except Exception:  # noqa: BLE001  ini 缺失/格式异常 → fallback
+        pass
+    return "G:/QTrading/StockData/stock.db"
+
+
+STOCK_DB = _resolve_hku_db_path()
 
 # 东财 push2 端点（与 hikyuu zh_block_em.py 一致）
 _NAMES_URL = "https://19.push2.eastmoney.com/api/qt/clist/get"
