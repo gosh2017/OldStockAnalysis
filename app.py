@@ -29,7 +29,7 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from config import (
-    StockContext, END_DATE, CACHE_DIR,
+    StockContext, END_DATE, CACHE_DIR, FIN_START, FIN_END,
     BACKTEST_REBALANCE_FREQ, BACKTEST_HOLD_PERIOD, BACKTEST_TOP_N,
     BACKTEST_MIN_GRADE, BACKTEST_WEIGHT, BACKTEST_TXN_COST,
     BACKTEST_BENCHMARK, BACKTEST_LOOKBACK_YEARS,
@@ -38,7 +38,8 @@ from config import (
 from data import (fetch_stock_list, generate_stock_list, search_stocks,
                   fetch_stock_screening_data, generate_stock_screening_data)
 from analysis import run_backtest, BacktestResult
-from main import main, run_batch, BATCH_DEMO_LIST
+from main import main, run_batch, BATCH_DEMO_LIST, BATCH_PARTIAL_PKL, \
+    batch_partial_path
 
 # -- 配色（与 matplotlib 图表 / HTML 报告保持一致）---------
 COLORS = {
@@ -70,10 +71,10 @@ def run_analysis(symbol, name, demo, fin_start, fin_end):
 
 
 def run_batch_silent(demo=True, items=None, on_progress=None, on_partial=None,
-                     per_stock_timeout=None, resume=True):
+                     per_stock_timeout=None, resume=True, years=None):
     buf = io.StringIO()
     with redirect_stdout(buf):
-        return run_batch(items or BATCH_DEMO_LIST, demo=demo,
+        return run_batch(items or BATCH_DEMO_LIST, demo=demo, years=years,
                          on_progress=on_progress, on_partial=on_partial,
                          per_stock_timeout=per_stock_timeout, resume=resume)
 
@@ -187,18 +188,26 @@ def _poll_job(job_key, result_key, error_label, render_partial=None):
         st.session_state.pop(job_key, None)
 
 
-def _recover_batch_partial():
+def _recover_batch_partial(years=None):
     """从落盘 partial 恢复上次被进程中断的批量结果（main.run_batch 的 partial_path 写盘）。
 
     仅在「无活跃 batch_job 且本次尚未出结果」时恢复一次，避免与新启动的运行
     抢写。new run 开始时（tab_batch 处）会 pop "batch" 并启动新 job，本函数
-    因检测到活跃 job 而跳过，不会用旧落盘覆盖新运行。"""
+    因检测到活跃 job 而跳过，不会用旧落盘覆盖新运行。
+
+    years 为当前 tab 选定的基本面年份区间：partial 按年份分片落盘（见
+    main.batch_partial_path），恢复也必须按同一区间取文件，否则会把别的年份
+    口径的结果当成本次成果。分片文件缺失且当前区间等于 config 默认时，回退
+    旧版单文件 BATCH_PARTIAL_PKL（分片改造前的遗留结果不丢）。"""
     if st.session_state.get("batch_job"):
         return
     if "batch" in st.session_state:
         return
     try:
-        from main import BATCH_PARTIAL_PKL as _pkl
+        _pkl = batch_partial_path(years)
+        _default = (years is None or tuple(years) == (FIN_START, FIN_END))
+        if not os.path.exists(_pkl) and _default and os.path.exists(BATCH_PARTIAL_PKL):
+            _pkl = BATCH_PARTIAL_PKL      # 遗留单文件回退
         if not os.path.exists(_pkl):
             return
         df = pd.read_pickle(_pkl)
@@ -257,13 +266,17 @@ def _load_dashboard_inputs() -> dict:
 def _save_dashboard_inputs() -> None:
     """把当前 session_state 中的批量/回测标的文本落盘。失败静默降级。
 
-    作为两个输入框的 on_change 回调，也供「➕ 添加 / ❌ 移除」后显式调用——
-    这些路径直接改写 widget 的 session_state，不会触发 on_change，需手动保存。"""
+    作为两个输入框与批量年份输入的 on_change 回调，也供「➕ 添加 / ❌ 移除」后
+    显式调用——这些路径直接改写 widget 的 session_state，不会触发 on_change，
+    需手动保存。batch_years 一并落盘：年份决定 partial 分片名，重启后若年份
+    回退默认就恢复不到上次运行的那份结果。"""
     try:
         os.makedirs(CACHE_DIR, exist_ok=True)
         payload = {
             "batch_symbols": st.session_state.get("batch_symbols", ""),
             "bt_symbols": st.session_state.get("bt_symbols", ""),
+            "batch_years": [int(st.session_state.get("batch_fin_start", FIN_START)),
+                            int(st.session_state.get("batch_fin_end", FIN_END))],
         }
         with open(_DASHBOARD_INPUTS_CACHE, "w", encoding="utf-8") as f:
             json.dump(payload, f, ensure_ascii=False, indent=2)
@@ -1115,10 +1128,33 @@ with tab_screen:
     _render_screening_tab(demo)
 
 with tab_batch:
-    _recover_batch_partial()
     st.markdown("对多只标的逐只打分并按综合评分排序。")
     st.caption("当前模式：" + ("Demo（离线模拟数据）" if demo else "在线（逐只联网分析，较慢）")
                + "。可在左侧栏切换 Demo 模式；左侧栏搜索后可直接添加至本清单，或在此手动编辑。")
+
+    # -- 基本面年份（评分口径，本 tab 独立于左侧栏同名输入）--
+    # 须早于 _recover_batch_partial 与运行按钮读取：partial 落盘按年份分片，
+    # 恢复与断点续跑都要用同一区间，否则会把别的年份口径的结果当成本次成果。
+    _y1, _y2 = st.columns(2)
+    _fy_max = int(END_DATE[:4])
+    _c_years = _inputs_cache.get("batch_years")
+    if (not isinstance(_c_years, (list, tuple)) or len(_c_years) != 2
+            or not all(isinstance(v, int) for v in _c_years) or _c_years[0] > _c_years[1]):
+        _c_years = (FIN_START, FIN_END)
+    _bt_fin_start = _y1.number_input(
+        "基本面起始年", min_value=2010, max_value=_fy_max, value=int(_c_years[0]),
+        key="batch_fin_start", on_change=_save_dashboard_inputs,
+        help="四步分析所用的财报年份窗口下界（默认 config.FIN_START）。仅本 tab 生效——"
+             "左侧栏同名输入只作用于「单股分析」。改年份后评分口径整体变化，"
+             "进度（断点续跑 / 中断恢复）按年份隔离、不复用旧口径结果。")
+    _bt_fin_end = _y2.number_input(
+        "基本面结束年", min_value=2010, max_value=_fy_max, value=int(_c_years[1]),
+        key="batch_fin_end", on_change=_save_dashboard_inputs,
+        help="财报年份窗口上界（默认 config.FIN_END）。")
+    _batch_years = (int(_bt_fin_start), int(_bt_fin_end))
+    _years_ok = _batch_years[0] <= _batch_years[1]
+    if _years_ok:
+        _recover_batch_partial(_batch_years)
     if st.session_state.pop("_batch_recovered", False):
         st.success("📦 已恢复上次中断前已完成的批量结果（进程中断时落盘成果不丢）。"
                    "点击下方按钮可基于当前清单重新运行。")
@@ -1132,16 +1168,21 @@ with tab_batch:
     btn_label = "▶ 运行批量打分" + ("（Demo）" if demo else "（在线逐只联网）")
     _batch_running = (st.session_state.get("batch_job") or {}).get("status") == "running"
     if st.button(btn_label, type="primary", disabled=_batch_running):
-        items = _parse_batch_text(batch_text) if batch_text.strip() else BATCH_DEMO_LIST
-        if not items:
-            st.error("未解析到任何标的，请按每行 `代码,名称` 输入。")
+        if not _years_ok:
+            st.error("基本面起始年不能晚于结束年，请修正后再运行。")
         else:
-            # 先清上一轮结果：后台线程跑到完成前，绝不把旧结果当本次结果展示
-            st.session_state.pop("batch", None)
-            _hint = f"批量分析中（{len(items)} 只 · {'Demo' if demo else '在线'}）…"
-            _start_job("batch_job", run_batch_silent,
-                       dict(demo=demo, items=items, resume=True), _hint)
-            st.rerun()  # 进入轮询：用 st.progress 渲染后台进度
+            items = _parse_batch_text(batch_text) if batch_text.strip() else BATCH_DEMO_LIST
+            if not items:
+                st.error("未解析到任何标的，请按每行 `代码,名称` 输入。")
+            else:
+                # 先清上一轮结果：后台线程跑到完成前，绝不把旧结果当本次结果展示
+                st.session_state.pop("batch", None)
+                _hint = (f"批量分析中（{len(items)} 只 · {'Demo' if demo else '在线'}"
+                         f" · {_batch_years[0]}–{_batch_years[1]}）…")
+                _start_job("batch_job", run_batch_silent,
+                           dict(demo=demo, items=items, resume=True,
+                                years=_batch_years), _hint)
+                st.rerun()  # 进入轮询：用 st.progress 渲染后台进度
     _poll_job("batch_job", "batch", "批量分析")
     if "batch" in st.session_state:
         render_batch(st.session_state["batch"])

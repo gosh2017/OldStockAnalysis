@@ -31,7 +31,7 @@ import pandas as pd
 # 等导入本模块时干扰其 stdout 处理。
 
 from config import (
-    STOCK_CODE, STOCK_NAME, StockContext, END_DATE,
+    STOCK_CODE, STOCK_NAME, StockContext, END_DATE, FIN_START, FIN_END,
     BACKTEST_REBALANCE_FREQ, BACKTEST_HOLD_PERIOD, BACKTEST_TOP_N,
     BACKTEST_MIN_GRADE, BACKTEST_WEIGHT, BACKTEST_TXN_COST,
     BACKTEST_BENCHMARK, BACKTEST_LOOKBACK_YEARS, BACKTEST_RISK_FREE,
@@ -79,7 +79,25 @@ from visualization import (
 # 和已完成的 partial 一并丢失（见"批量分析到 150 只后无结果"问题）。
 BATCH_PER_STOCK_TIMEOUT = 60
 # partial df 落盘路径（进程重生恢复用）。.cache/ 已在 .gitignore。
+# 仅为「沿用旧文件名」保留：实际写入/恢复走 batch_partial_path()，按基本面年份
+# 区间分片，避免不同年份口径的结果互相复用。
 BATCH_PARTIAL_PKL = os.path.join(".cache", "batch_partial.pkl")
+
+
+def batch_partial_path(years=None) -> str:
+    """按基本面年份区间分片的 partial 落盘路径（resume / 进程恢复共用）。
+
+    评分依赖 FIN_START~FIN_END 窗口：换年份后同一只标的的分数会不同，而
+    resume 与进程恢复都会把落盘 partial 当成本次结果复用。若共用一个文件名，
+    改年份后点「运行批量打分」会把旧年份的分数原样吐出来且不提示。故按区间
+    命名（batch_partial_2021_2025.pkl），不同口径天然隔离。
+
+    years 为 None 时用 config 默认年份——与 run_batch 内部的回退一致，
+    保证「未传年份」的调用方与 Streamlit 默认值命中同一文件。
+    """
+    ys = tuple(years) if years else (FIN_START, FIN_END)
+    return os.path.join(os.path.dirname(BATCH_PARTIAL_PKL) or ".",
+                        f"batch_partial_{int(ys[0])}_{int(ys[1])}.pkl")
 
 
 def main(ctx: StockContext, *, quiet: bool = False) -> dict:
@@ -308,18 +326,21 @@ def run_batch(items: list, demo: bool = False, years=None,
               resume: bool = False) -> pd.DataFrame:
     """对多只标的逐只执行分析并按综合评分排名。
 
-    years: 可选 (起始年, 结束年)，覆盖 config 默认基本面年份区间。
+    years: 可选 (起始年, 结束年)，覆盖 config 默认基本面年份区间。同时决定
+        partial 落盘文件名（见 batch_partial_path），不同年份的进度互不复用。
     on_progress: 可选回调 (done, total, desc)，逐只上报进度。CLI 由 _cli 包一层
         tqdm Progress；Streamlit 仪表盘传 st.progress 闭包；None 时不报。
     on_partial: 可选回调 (partial_df)，每只标的完成后把「已完成的排名快照」
         传出去，供仪表盘/调用方渐进展示——避免整批跑完前用户只能看到空白，也
         在后台线程异常中断时保住已完成的成果（见"批量分析到 150 只后无结果"
         问题）。None 时不报。
-    partial_path: partial df 的落盘路径（进程重生恢复用）。默认 BATCH_PARTIAL_PKL。
+    partial_path: partial df 的落盘路径（进程重生恢复用）。默认
+        batch_partial_path(years)——按年份区间分片，见该函数说明。
     per_stock_timeout: 单只标的最长分析秒数，默认 BATCH_PER_STOCK_TIMEOUT。
         超时则该行记"错误:超时"，不影响后续标的。
     resume: True 时从 partial_path 读回上次已成功完成的部分直接复用（断点续跑），
         仅重跑未完成/出错的标的；已完成的不再重算。False 时按顺序跑满全部。
+        partial 按 years 分片落盘，换年份不会被当成同一次运行复用。
     """
     mode = "demo" if demo else "live"
     print(f"\n{'=' * 70}\n  批量选股打分（{len(items)} 只标的 · {mode} 模式）\n{'=' * 70}")
@@ -327,7 +348,7 @@ def run_batch(items: list, demo: bool = False, years=None,
     rows = []
     n = len(items)
     timeout = per_stock_timeout if per_stock_timeout is not None else BATCH_PER_STOCK_TIMEOUT
-    pkl_path = partial_path or BATCH_PARTIAL_PKL
+    pkl_path = partial_path or batch_partial_path(years)
 
     # 断点续跑：从落盘 partial 复用已成功完成（建议为真实建议、非出错/超时）的标的，
     # 避免重跑、快速恢复进度，也防止同一只标重复占用内存把进程推高

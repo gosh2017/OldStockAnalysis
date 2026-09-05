@@ -27,6 +27,13 @@
 - **Streamlit 仪表盘进度条**：`app.py` 的 `run_batch_silent` / `run_backtest_silent` 透传 `on_progress`；批量排名与历史回测两标签页按钮处理改用 `st.progress` 实时渲染（取代原 `st.spinner` 的"无进度等待"），成功时置 100%、异常时清空条并报错。
 - **依赖**：`requirements.txt` 新增 `tqdm>=4.60`（运行依赖，标注未安装时自动回退）。
 
+### 新增 / 修复（批量排名年份窗口）
+- **批量排名可配基本面年份窗口**：仪表盘「批量排名」tab 新增「基本面起始年 / 结束年」输入（默认 `config.FIN_START/FIN_END`，**仅本 tab 生效**——左侧栏同名输入只作用于「单股分析」），经 `run_batch_silent(years=...)` → `run_batch(years=...)` 透传到 `StockContext.fin_start/fin_end`，与 CLI `--years` 同口径。此前批量排名固定用写死的默认窗口，改侧边栏年份对其完全无效；起始年晚于结束年时阻止运行并提示（否则 `range()` 空区间 → 静默全 0 分）。
+- **进度缓存按年份分片**：`run_batch` 的 partial 落盘改走新增的 `main.batch_partial_path(years)`（`.cache/batch_partial_{start}_{end}.pkl`）。此前 resume 与进程中断恢复共用 `batch_partial.pkl`，改年份后点「运行」会把**旧口径的分数**原样当成本次结果复用且不提示；现在不同窗口天然隔离，同窗口内的断点续跑语义不变。`_recover_batch_partial(years)` 按当前选定区间取文件，分片缺失且区间等于 config 默认时回退旧版单文件（分片改造前的遗留成果不丢，`BATCH_PARTIAL_PKL` 常量保留作此用途）。
+- **Demo 数据跟随年份窗口**：`generate_all_demo_data` 默认分支改取 `ctx.fin_start/ctx.fin_end`（未传覆盖时 ctx 取 config 默认 → 与 `main --demo` 逐字节一致，零回归），使 Demo 模式下年份输入同样生效——此前 demo 忽略 ctx 年份，窗口与下游筛选不一致。
+- **年份窗口跨启动持久化**：`.cache/dashboard_inputs.json` 新增 `batch_years`，与批量 / 历史回测标的清单一同恢复（否则重启后年份回退默认，恢复不到上次运行的那份分片结果）。
+- **测试**：新增 `tests/test_batch_years.py`（4 例）——路径分片与 `years=None` 回退、`years` 透传 ctx 且 resume 不跨窗口复用（同窗口仍复用）、`run_batch_silent` 透传 years/resume（仪表盘接线段）、仪表盘年份输入在位与落盘 / 恢复。`pytest -q` 181 项全绿；`--batch-demo --years 2018 2024` 离线跑通，筛选表年份区间随窗口变化。
+
 ---
 
 > 以下为**估值 / 评分 / 情绪口径**三组合理性优化，对应 `prompts/01_dcf_valuation.md`（A）、`prompts/02_scoring.md`（B）、`prompts/03_sentiment_fundamental.md`（C）。条目以 `(A1)`/`(B2)` 等标注回溯至提示词。

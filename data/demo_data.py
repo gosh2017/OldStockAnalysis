@@ -395,8 +395,9 @@ def generate_all_demo_data(ctx=None, *, backtest: bool = False) -> dict:
     backtest（默认 False）：True 时生成回测专用的**宽跨度多报告期序列**——
     财务/现金流/分红/PE-PB 跨 year(START_DATE)−5 ~ year(END_DATE) 全期，并按
     标的派生质量因子 quality 缩放，使 D1 截断到任意 as_of 都能取到"该时点已知
-    的多期财务"且截面有 A/B/C/D 分散。backtest=False（默认）仍取 FIN_START..FIN_END
-    最近若干年、quality=1.0，与 main --demo 口径逐字节一致（零回归）。
+    的多期财务"且截面有 A/B/C/D 分散。backtest=False（默认）取 ctx.fin_start..
+    ctx.fin_end（未传覆盖即 config.FIN_START..FIN_END）、quality=1.0，与 main
+    --demo 口径逐字节一致（零回归）。
     """
     sym = ctx.symbol if ctx is not None else STOCK_CODE
     start = ctx.start_date if ctx is not None else START_DATE
@@ -408,7 +409,11 @@ def generate_all_demo_data(ctx=None, *, backtest: bool = False) -> dict:
         fin_end = int(END_DATE[:4])                 # 今年
         quality = _quality_for(sym)                  # 按标的派生质量因子
     else:
-        fin_start, fin_end, quality = FIN_START, FIN_END, 1.0
+        # 跟随 ctx 的财报窗口（仪表盘「单股分析 / 批量排名」的年份输入）；未传覆盖
+        # 时 ctx 取 config 默认 FIN_START..FIN_END，故与原先逐字节一致（零回归）。
+        fin_start = ctx.fin_start if ctx is not None else FIN_START
+        fin_end = ctx.fin_end if ctx is not None else FIN_END
+        quality = 1.0
 
     return {
         "daily_df":     generate_daily_data(sym, start, end, seed=_seed_for(sym, 42)),
