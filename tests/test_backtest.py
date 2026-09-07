@@ -353,3 +353,55 @@ def test_run_backtest_excludes_delisted(monkeypatch):
         if pos["date"] > pd.Timestamp("2023-06-30"):
             held = {h["symbol"] for h in pos["holdings"]}
             assert "600519" not in held, f"退市标的仍被持有：{pos['date']}"
+
+
+# =====================================================================
+# fin_floor — 回测基本面下限年（可配下限、PIT 锚定末年）
+# 旧逻辑 _derive_fin_window 写死 fin_start = fin_end − 4（5 年滑动），切掉早年
+# 高 ROE 期使评分失真；新逻辑读 ctx.fin_start 作下限，末年仍由 PIT 自动派生。
+# =====================================================================
+
+def test_derive_fin_window_respects_floor():
+    """fin_start 取 ctx.fin_start 作下限，窗口比旧写死 5 年更宽。"""
+    from analysis.backtest import _derive_fin_window
+    fin = pd.DataFrame({"报告期": pd.to_datetime(
+        ["2017-12-31", "2018-12-31", "2019-12-31", "2020-12-31",
+         "2021-12-31", "2022-12-31", "2023-12-31"])})
+    ctx = StockContext(symbol="000001", name="test", fin_start=2016, fin_end=2025)
+    fin_end, fin_start = _derive_fin_window(fin, ctx)
+    assert fin_end == 2023                       # 最近可得年报年（PIT 派生，不动）
+    assert fin_start == 2016                      # 取 ctx 下限，而非旧 fin_end−4=2019
+    assert fin_start < fin_end - 4                # 比旧 5 年窗口更宽
+
+
+def test_derive_fin_window_clamps_floor_to_fin_end():
+    """floor 晚于最近可得年报年 → 钳位到 fin_end，不反转、不越界。"""
+    from analysis.backtest import _derive_fin_window
+    fin = pd.DataFrame({"报告期": pd.to_datetime(
+        ["2021-12-31", "2022-12-31", "2023-12-31"])})
+    ctx = StockContext(symbol="000001", name="test", fin_start=2030, fin_end=2025)
+    fin_end, fin_start = _derive_fin_window(fin, ctx)
+    assert fin_end == 2023
+    assert fin_start == fin_end                    # floor 晚于末年 → 退化为 fin_end
+
+
+def test_run_backtest_fin_floor_threads(monkeypatch):
+    """fin_floor 贯穿 run_backtest → StockContext(fin_start=...) → analyze_as_of 入参。
+
+    monkeypatch 捕获 analyze_as_of 收到的 ctx.fin_start；用显式非默认值 2018
+    证明是参数透传，而非碰巧命中默认 BACKTEST_FIN_FLOOR=2016。
+    """
+    import analysis.backtest as bt
+    captured = []
+
+    def fake_analyze(ctx_as_of, bundle):
+        captured.append(ctx_as_of.fin_start)
+        return {"score": 0.0, "grade": "D", "recommendation": "卖出",
+                "latest_price": 10.0, "screened": False,
+                "as_of": pd.Timestamp(ctx_as_of.end_date),
+                "ctx": ctx_as_of, "fin_end": 2023, "fin_start": ctx_as_of.fin_start}
+
+    monkeypatch.setattr(bt, "analyze_as_of", fake_analyze)
+    _run_bt(fin_floor=2018)
+    assert captured, "analyze_as_of 未被调用"
+    assert all(f == 2018 for f in captured), f"fin_floor 未透传：{set(captured)}"

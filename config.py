@@ -423,6 +423,8 @@ BACKTEST_TXN_COST       = 0.0005  # 单边交易成本（0.05%）；换仓双边
 BACKTEST_BENCHMARK      = "000300"  # 基准指数（沪深 300）
 BACKTEST_LOOKBACK_YEARS = 10     # 默认回测回溯年数（未给 --years 时 end=今天、start=今天−N 年）
 BACKTEST_PUB_LAG_DAYS   = 120    # 财报披露滞后保守口径（年报次年 4–5 月披露，≈4 个月）
+BACKTEST_FIN_FLOOR      = 2016   # 回测基本面起始年（下限）；末年随回测时点 PIT 自动派生，
+                                 # 与单股 --years 口径一致；调高→窗口变窄，调低→用更多历史
 BACKTEST_RISK_FREE      = None   # 无风险利率；None=取国债历史区间均值年化
 # -- 信号有效性判定（等级前向收益的统计口径）--
 BACKTEST_MIN_SAMPLE      = 8     # 单等级最小样本数；不足则判"样本不足"不下有效/无效结论

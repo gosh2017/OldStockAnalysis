@@ -35,6 +35,7 @@ from config import (
     BACKTEST_REBALANCE_FREQ, BACKTEST_HOLD_PERIOD, BACKTEST_TOP_N,
     BACKTEST_MIN_GRADE, BACKTEST_WEIGHT, BACKTEST_TXN_COST,
     BACKTEST_BENCHMARK, BACKTEST_LOOKBACK_YEARS, BACKTEST_RISK_FREE,
+    BACKTEST_FIN_FLOOR,
     BOND_SMOOTH_POINTS,
 )
 from utils import sep, recent_value, Progress
@@ -450,11 +451,13 @@ def run_batch(items: list, demo: bool = False, years=None,
     return df
 
 
-def run_backtest_flow(items, *, demo: bool, years, no_chart: bool, out_dir: str | None) -> None:
+def run_backtest_flow(items, *, demo: bool, years, no_chart: bool, out_dir: str | None,
+                      fin_floor: int | None = None) -> None:
     """历史回测入口：run_backtest → 图表 → 打印业绩表 + 等级前向收益表 + 结论。
 
     --years 复用为回测区间（YYYY；转 YYYYMMDD 起止）；缺省 end=今天、start=今天−
     BACKTEST_LOOKBACK_YEARS 年。回测参数取 config.BACKTEST_* 集中配置。
+    fin_floor 为基本面起始年下限（None→BACKTEST_FIN_FLOOR）；末年随调仓时点 PIT 自动派生。
     """
     if years:
         if years[0] > years[1]:
@@ -478,6 +481,7 @@ def run_backtest_flow(items, *, demo: bool, years, no_chart: bool, out_dir: str 
     if demo:
         print("[INFO] --backtest-demo：使用 seeded 模拟数据，全程无网（非真实行情）")
 
+    fin_floor_eff = fin_floor if fin_floor is not None else BACKTEST_FIN_FLOOR
     with Progress() as prog:
         result = run_backtest(
             items, start=start, end=end,
@@ -485,6 +489,7 @@ def run_backtest_flow(items, *, demo: bool, years, no_chart: bool, out_dir: str 
             top_n=BACKTEST_TOP_N, min_grade=BACKTEST_MIN_GRADE,
             weight=BACKTEST_WEIGHT, txn_cost=BACKTEST_TXN_COST,
             benchmark=BACKTEST_BENCHMARK, demo=demo, on_progress=prog,
+            fin_floor=fin_floor_eff,
         )
 
     if not no_chart:
@@ -667,6 +672,10 @@ def _cli():
         "--years", nargs=2, type=int, metavar=("START", "END"), default=None,
         help="基本面年份范围，如 --years 2020 2024（默认 config 的 2021 2025）",
     )
+    parser.add_argument(
+        "--fin-start", type=int, default=None, metavar="YEAR",
+        help="回测基本面起始年（下限；末年随回测时点 PIT 自动派生），默认 2016。仅回测模式生效。",
+    )
     # 四种运行模式互斥（同时指定两种 → argparse 报错，而非静默取先到者）
     mode_group = parser.add_mutually_exclusive_group()
     mode_group.add_argument(
@@ -690,7 +699,8 @@ def _cli():
     # -- 回测模式分发 --
     if args.backtest_demo:
         run_backtest_flow(BATCH_DEMO_LIST, demo=True, years=args.years,
-                          no_chart=args.no_chart, out_dir=args.out_dir)
+                          no_chart=args.no_chart, out_dir=args.out_dir,
+                          fin_floor=args.fin_start)
         return
     if args.backtest:
         items = _read_batch_file(args.backtest)
@@ -698,7 +708,8 @@ def _cli():
             print(f"[X] 未从 {args.backtest} 读到任何标的（每行格式：代码,名称）")
             return
         run_backtest_flow(items, demo=args.demo, years=args.years,
-                          no_chart=args.no_chart, out_dir=args.out_dir)
+                          no_chart=args.no_chart, out_dir=args.out_dir,
+                          fin_floor=args.fin_start)
         return
 
     # -- 批量模式分发 --

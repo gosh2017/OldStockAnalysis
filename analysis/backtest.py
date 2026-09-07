@@ -26,7 +26,7 @@ import pandas as pd
 
 from config import (
     StockContext, START_DATE, END_DATE,
-    BACKTEST_PUB_LAG_DAYS, BACKTEST_TXN_COST,
+    BACKTEST_PUB_LAG_DAYS, BACKTEST_TXN_COST, BACKTEST_FIN_FLOOR,
     BACKTEST_MIN_SAMPLE, BACKTEST_BOOTSTRAP_ITERS,
     BACKTEST_BOOTSTRAP_SEED, BACKTEST_CI_LEVEL,
 )
@@ -49,8 +49,8 @@ _GRADE_RANK = {"A": 4, "B": 3, "C": 2, "D": 1}
 # =====================================================================
 
 def _derive_fin_window(fin, ctx) -> tuple[int, int]:
-    """从 PIT 截断后的财务摘要取最近年报年作 fin_end，fin_start = fin_end − 4
-    （与 main() 的 5 年窗口一致）。空/无报告期列时回退 ctx 默认。"""
+    """从 PIT 截断后的财务摘要取最近年报年作 fin_end，fin_start 取 ctx.fin_start
+    作下限（不晚于 fin_end），与 main() 的可配年份窗口口径一致。空/无报告期列时回退 ctx 默认。"""
     if fin is None or not isinstance(fin, pd.DataFrame) or fin.empty:
         return ctx.fin_end, ctx.fin_start
     date_col = find_col_in(["报告期", "报告日期", "日期", "report"], fin)
@@ -60,7 +60,7 @@ def _derive_fin_window(fin, ctx) -> tuple[int, int]:
     if ts.empty:
         return ctx.fin_end, ctx.fin_start
     fin_end = int(ts.max().year)
-    fin_start = fin_end - 4
+    fin_start = min(ctx.fin_start, fin_end)   # floor 晚于最近可得年报时退化为 fin_end
     return fin_end, fin_start
 
 
@@ -90,8 +90,8 @@ def analyze_as_of(ctx_as_of, bundle: dict) -> dict:
     StockContext，按 main() 同序调用 step1–4 + compute_score，**静默**（抑制 sep
     打印，redirect_stdout 兜底，因现有步骤函数无 quiet 参数）。
 
-    fin 窗口从 bundle 截断后的 fin_abstract 派生（fin_end=最近年报年、fin_start=fin_end−4），
-    显式传给 fundamental_screening / dcf_valuation（覆盖 ctx 默认）。bundle 的 daily
+    fin 窗口从 bundle 截断后的 fin_abstract 派生（fin_end=最近年报年、fin_start=ctx.fin_start
+    作下限），显式传给 fundamental_screening / dcf_valuation（覆盖 ctx 默认）。bundle 的 daily
     已截断到 <= as_of，故 investment_advice 的 iloc[-1] 即"截至 T 的最新价/日"，天然 PIT 正确。
 
     不复用 main()（避免每日重取数与大量打印），是对现有纯函数的薄编排，不改 step/scoring
@@ -384,7 +384,8 @@ def _build_equity_curve(periods, rets_df: pd.DataFrame, calendar: pd.DatetimeInd
 
 def run_backtest(symbols, *, start, end, freq="Q", hold_days=None,
                  top_n=10, min_grade="B", weight="equal", txn_cost=BACKTEST_TXN_COST,
-                 benchmark="000300", demo=False, on_progress=None) -> BacktestResult:
+                 benchmark="000300", demo=False, on_progress=None,
+                 fin_floor: int = BACKTEST_FIN_FLOOR) -> BacktestResult:
     """回测引擎：调仓日序列 → 每标的 analyze_as_of → 选股 → 持有 → 换仓成本 → 日频净值。
 
     参数:
@@ -401,6 +402,8 @@ def run_backtest(symbols, *, start, end, freq="Q", hold_days=None,
       on_progress: 可选进度回调 (done, total, desc)。两阶段：预取数据（逐标的）+
         逐期回测（调仓日×标的，调仓日序列确定后 total 方可知，故跨阶段 total 会变，
         CLI 的 tqdm 据此关旧条开新条，仪表盘 st.progress 据 desc 切阶段文本）。None 不报。
+      fin_floor: 基本面起始年（下限）；末年随回测时点 PIT 自动派生（见 _derive_fin_window）。
+        默认 BACKTEST_FIN_FLOOR（与单股 --years 口径一致）。
 
     返回 BacktestResult（equity_curve 日频 / positions / trades / benchmark_curve /
     grade_forward_returns / metrics / rebalance_dates）。
@@ -415,7 +418,7 @@ def run_backtest(symbols, *, start, end, freq="Q", hold_days=None,
         n_pre = len(symbols)
         for k, (sym, name) in enumerate(symbols):
             sym_ctx = StockContext(symbol=sym, name=sym, demo=True, no_chart=True,
-                                   start_date=START_DATE, end_date=end)
+                                   start_date=START_DATE, end_date=end, fin_start=fin_floor)
             caches[sym] = generate_all_demo_data(sym_ctx, backtest=True)
             if on_progress:
                 on_progress(k + 1, n_pre, f"预取数据 {k + 1}/{n_pre} · {name}")
@@ -491,7 +494,8 @@ def run_backtest(symbols, *, start, end, freq="Q", hold_days=None,
             bundle = as_of_bundle(sym, T, caches[sym], demo=demo,
                                   pub_lag_days=BACKTEST_PUB_LAG_DAYS)
             sym_ctx = StockContext(symbol=sym, name=name, demo=demo, no_chart=True,
-                                   start_date=START_DATE, end_date=T_str)
+                                   start_date=START_DATE, end_date=T_str,
+                                   fin_start=fin_floor)
             res = analyze_as_of(sym_ctx, bundle)
             results[sym] = res
             # 全部存活标的（不限入选）按等级分桶，记 hold 期前向收益

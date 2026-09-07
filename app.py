@@ -32,7 +32,7 @@ from config import (
     StockContext, END_DATE, CACHE_DIR, FIN_START, FIN_END,
     BACKTEST_REBALANCE_FREQ, BACKTEST_HOLD_PERIOD, BACKTEST_TOP_N,
     BACKTEST_MIN_GRADE, BACKTEST_WEIGHT, BACKTEST_TXN_COST,
-    BACKTEST_BENCHMARK, BACKTEST_LOOKBACK_YEARS,
+    BACKTEST_BENCHMARK, BACKTEST_LOOKBACK_YEARS, BACKTEST_FIN_FLOOR,
     MARKET_CAP_DEFAULT_MIN_YI, MARKET_CAP_DEFAULT_MAX_YI,
 )
 from data import (fetch_stock_list, generate_stock_list, search_stocks,
@@ -1198,21 +1198,25 @@ with tab_backtest:
 
     # -- 回测参数 --
     bt_end_year = int(END_DATE[:4])
-    p1, p2, p3, p4 = st.columns(4)
+    p1, p2, p3, p4, p5 = st.columns(5)
     bt_start_year = p1.number_input("回测起始年", min_value=2010, max_value=bt_end_year,
                                     value=bt_end_year - BACKTEST_LOOKBACK_YEARS,
                                     help="回测区间起始年份（数据需覆盖该年起）")
     bt_end_in = p2.number_input("回测结束年", min_value=2010, max_value=bt_end_year,
                                 value=bt_end_year,
                                 help="回测区间结束年份（含该年全年数据）")
+    fin_floor_in = p3.number_input("基本面起始年", min_value=2010, max_value=bt_end_year,
+                                   value=BACKTEST_FIN_FLOOR,
+                                   help="基本面数据下限年；末年随回测时点自动取 PIT 最近可得年报年。"
+                                        "与单股「基本面起止年」口径一致——调高→窗口变窄，调低→用更多历史。")
     _freq_map = {"M": "M（每月 Monthly）", "Q": "Q（每季 Quarterly）", "Y": "Y（每年 Yearly）"}
     _grade_map = {"A": "A（最优）", "B": "B（良好）", "C": "C（一般）", "D": "D（较差）"}
     _weight_map = {"equal": "equal（等权）", "score": "score（按评分加权）"}
-    freq_label = p3.selectbox("调仓频率", list(_freq_map.values()),
+    freq_label = p4.selectbox("调仓频率", list(_freq_map.values()),
                               index=list(_freq_map.keys()).index(BACKTEST_REBALANCE_FREQ),
                               help="调仓频率：M=每月 / Q=每季度 / Y=每年")
     freq = list(_freq_map.keys())[list(_freq_map.values()).index(freq_label)]
-    min_grade_label = p4.selectbox("最低入选等级", list(_grade_map.values()),
+    min_grade_label = p5.selectbox("最低入选等级", list(_grade_map.values()),
                                    index=list(_grade_map.keys()).index(BACKTEST_MIN_GRADE),
                                    help="仅纳入综合评分 ≥ 该等级的个股（A 最严 → D 最宽）")
     min_grade = list(_grade_map.keys())[list(_grade_map.values()).index(min_grade_label)]
@@ -1256,7 +1260,7 @@ with tab_backtest:
                        dict(items=items, demo=demo, start=start, end=end,
                             freq=freq, hold_days=hold_days, top_n=top_n,
                             min_grade=min_grade, weight=weight, txn_cost=txn,
-                            benchmark=BACKTEST_BENCHMARK),
+                            benchmark=BACKTEST_BENCHMARK, fin_floor=int(fin_floor_in)),
                        _hint)
             st.rerun()
     _poll_job("backtest_job", "backtest", "回测")

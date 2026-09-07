@@ -98,7 +98,7 @@ WACC 列为 Rf=2.3%（`RISK_FREE_REFERENCE`）校准锚下的静态兜底值；�
 回测层以"数据注入"方式复用 step1–4 / scoring，**不改其算法与权重**，验证综合评分信号在历史上是否有效。核心流程：`run_backtest` 在每个调仓日 T 对每标的调 `analyze_as_of`（用 `data/pit.py` 截断到 ≤ T 的准 PIT 数据，避免未来函数）得 score/grade/recommendation，按 `min_grade` + `top_n` 选股、等权或得分加权持有，日频 mark-to-market 记净值、扣双边换仓成本；`grade_forward_returns` 把**全部**标的按等级分桶记 hold 期前向收益，`compute_metrics` 算 CAGR/波动/最大回撤/Sharpe/胜率/Alpha/Beta。
 
 - **时点完整性（准 PIT）**：AkShare 财务/现金流接口返回全历史且常含重述后数据，回测按"截止 as-of 日 T"显式截断所有输入序列（`truncate_to_date`），财报另按"报告期 + 披露滞后 120d"过滤（`filter_reports_by_pub_lag`，避免把未披露年报当已知）。**非严格历史可得**——重述/幸存者偏差见「已知限定」。
-- **可配置**：`config.BACKTEST_*` 集中调仓频率（M/Q/Y）、持有期、top_n、最低等级、权重、交易成本、基准、回溯年数、披露滞后、无风险利率。
+- **可配置**：`config.BACKTEST_*` 集中调仓频率（M/Q/Y）、持有期、top_n、最低等级、权重、交易成本、基准、回溯年数、披露滞后、无风险利率、基本面起始年下限（`BACKTEST_FIN_FLOOR`，末年随调仓时点 PIT 自动派生——回测横跨多年，末年不能钉死成最新年，否则早期调仓偷看未来）。CLI `--fin-start` / 仪表盘「基本面起始年」输入运行时覆盖；与单股 `--years` 口径一致，避免回测窗口窄于单股使评分失真。
 - **离线可复现**：`--backtest-demo` 用 seeded 模拟数据（跨 ~2011–今宽跨度多报告期 + 按标的派生 quality 因子制造 A/B/C/D 截面分散），全程无网；`--backtest FILE` 为实盘联网路径。
 
 ## 使用方法
@@ -130,6 +130,7 @@ python main.py --batch-demo
 # 历史回测 demo（内置标的 + 模拟数据，全程无网验证回测机制）
 python main.py --backtest-demo
 python main.py --backtest-demo --years 2018 2024 --no-chart   # 指定回测区间、不生图
+python main.py --backtest-demo --fin-start 2016               # 基本面下限年（末年随回测时点 PIT 自动派生）
 
 # 历史回测实盘（读 代码,名称 清单，需联网）
 python main.py --backtest stocks.txt
@@ -156,10 +157,11 @@ streamlit run app.py
 | `--backtest FILE` | 历史回测：读取 `代码,名称` 文本文件验证信号历史有效性（实盘联网） |
 | `--backtest-demo` | 历史回测 demo：内置标的 + seeded 模拟数据，全程无网验证回测机制 |
 | `--years START END` | 基本面年份范围（默认 2021 2025）；回测模式下复用为回测区间 |
+| `--fin-start YEAR` | 回测基本面起始年下限（默认 2016）；末年随回测时点 PIT 自动派生。仅回测模式生效 |
 
 ## 配置
 
-修改 [config.py](config.py) 可自定义全部行为：标的、日期范围、行业画像（`INDUSTRY_PROFILES` / `SW_TO_BUCKET`）、DCF 参数与三情景、敏感性网格、筛选阈值（`ROE_THRESHOLD` / `DIV_THRESHOLD` / `MIN_COVERAGE_YEARS`）、评分权重与子权重、等级分档、输出目录。CLI 的 `--years` / `--out-dir` 等可在运行时覆盖。
+修改 [config.py](config.py) 可自定义全部行为：标的、日期范围、行业画像（`INDUSTRY_PROFILES` / `SW_TO_BUCKET`）、DCF 参数与三情景、敏感性网格、筛选阈值（`ROE_THRESHOLD` / `DIV_THRESHOLD` / `MIN_COVERAGE_YEARS`）、评分权重与子权重、等级分档、输出目录。CLI 的 `--years` / `--fin-start` / `--out-dir` 等可在运行时覆盖。
 
 ## 输出
 

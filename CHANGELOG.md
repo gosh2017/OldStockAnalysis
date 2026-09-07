@@ -9,7 +9,7 @@
 
 ### 新增（回测模块）
 - **(D1) 时点数据截断层 `data/pit.py`**：`truncate_to_date`（按日期列模糊匹配截断到 ≤ as_of）、`filter_reports_by_pub_lag`（财报按"报告期 + 披露滞后 120d"过滤，避免把未披露年报当已知 → 未来函数）、`as_of_bundle`（组合产出回测一次调用的全部截断数据）。保证每个调仓日 T 看到的数据不晚于 T。
-- **(D2) 时点分析适配器 `analysis/backtest.py::analyze_as_of`**：接收截断 bundle + end_date=as_of 的 StockContext，按 main() 同序调用 step1–4 + compute_score，`redirect_stdout` 静默；fin 窗口从 bundle 派生（fin_end=最近可用年报年、fin_start=fin_end−4，与 main 的 5 年窗口一致）。不改 step/scoring 内部；与 main() 等级/建议一致性回归用例守护。
+- **(D2) 时点分析适配器 `analysis/backtest.py::analyze_as_of`**：接收截断 bundle + end_date=as_of 的 StockContext，按 main() 同序调用 step1–4 + compute_score，`redirect_stdout` 静默；fin 窗口从 bundle 派生（fin_end=最近可用年报年、fin_start 取 `ctx.fin_start` 作下限并钳位到不晚于 fin_end，与 main 可配年份窗口口径一致——见下「回测基本面窗口」修复）。不改 step/scoring 内部；与 main() 等级/建议一致性回归用例守护。
 - **(D3) 回测引擎 `run_backtest`**：调仓日序列（M/Q/Y，纯 pandas 无 dateutil 依赖）→ 每标的 analyze_as_of → 选股（grade≥min_grade 且 score 降序 top_n）→ 等权/得分归一权重 → 日频 mark-to-market 净值（换仓扣双边成本、空仓期记 0、退市/停牌缺失记 0 并标 `delisted`）。`BacktestResult` 含 equity_curve/positions/trades/benchmark_curve/grade_forward_returns/metrics/rebalance_dates。`grade_forward_returns` 把**全部**标的按等级分桶记 hold 期前向收益，验证 A/B/C/D 单调性证据。
 - **(D4) 业绩度量 `compute_metrics`**：纯 numpy 实现总收益/CAGR/年化波动/最大回撤/Sharpe/胜率/Alpha/Beta；空/常数序列回退 None 不抛（vol=0→Sharpe=None、var(bench)=0→Beta=None），scipy 不可用无硬依赖。
 - **(D5) 基准与可视化**：`fetch_benchmark_daily`（沪深 300，`stock_zh_index_daily`/`index_zh_a_hist` fallback）+ `generate_benchmark_daily`（确定性模拟基准）；`visualization/backtest_charts.py` 三图——净值曲线（策略 vs 基准）/ 水下回撤图 / 各等级平均前向收益柱状（验单调性）。matplotlib 优先 + plotly 软导入，`--no-chart` 同口径，输出 `charts/backtest_*.{png,html}`。
@@ -33,6 +33,12 @@
 - **Demo 数据跟随年份窗口**：`generate_all_demo_data` 默认分支改取 `ctx.fin_start/ctx.fin_end`（未传覆盖时 ctx 取 config 默认 → 与 `main --demo` 逐字节一致，零回归），使 Demo 模式下年份输入同样生效——此前 demo 忽略 ctx 年份，窗口与下游筛选不一致。
 - **年份窗口跨启动持久化**：`.cache/dashboard_inputs.json` 新增 `batch_years`，与批量 / 历史回测标的清单一同恢复（否则重启后年份回退默认，恢复不到上次运行的那份分片结果）。
 - **测试**：新增 `tests/test_batch_years.py`（4 例）——路径分片与 `years=None` 回退、`years` 透传 ctx 且 resume 不跨窗口复用（同窗口仍复用）、`run_batch_silent` 透传 years/resume（仪表盘接线段）、仪表盘年份输入在位与落盘 / 恢复。`pytest -q` 181 项全绿；`--batch-demo --years 2018 2024` 离线跑通，筛选表年份区间随窗口变化。
+
+### 修复（回测基本面窗口：写死 5 年 → 可配下限年）
+- **根因**：`_derive_fin_window` 写死 `fin_start = fin_end − 4`（5 年滑动），末年 `fin_end` 由 PIT 截断后的最近年报年派生（这部分正确、不动）。于是回测在 2025 年 7 月时点窗口 = 2020–2024，恰好切掉部分标的 2016–2020 的高 ROE 高光期，使 ROE 均值/稳定性、股息均值、OCF 中位数等对窗口敏感的子分被拉低、评分从 B 掉到 C；而单股用 10 年（`--years 2016 2025`）把这些强年份计入 → 两者口径不一致。
+- **修复**：下限改为可配的"起始年"，末年仍由 PIT 自动派生（保证时点正确性——回测横跨多年，末年不能钉死成 2025，否则早期调仓时点偷看未来）。`_derive_fin_window` 读 `ctx.fin_start` 作下限并钳位到不晚于 `fin_end`，复用 `StockContext.fin_start` 承载，与 main() 可配年份窗口口径一致。默认 `BACKTEST_FIN_FLOOR = 2016`，开箱与单股 2016–2025 对齐。
+- **接线**：`run_backtest(fin_floor=BACKTEST_FIN_FLOOR)` → 两处 `StockContext(fin_start=fin_floor)`（demo 预取确保数据覆盖到下限、逐调仓时点供 `_derive_fin_window` 读取）。CLI 新增 `--fin-start YEAR`（仅回测模式生效，`--years` 仍复用为回测日历区间）；仪表盘「历史回测」tab 新增「基本面起始年」输入（首行扩为 5 列），经 `run_backtest_silent` 的 `**kwargs` 自动透传。单股 / 批量仍用 `--years`，不受影响。
+- **测试**：新增 `tests/test_backtest.py` 3 例——`_derive_fin_window` 取下限使窗口宽于旧 5 年、floor 晚于末年钳位到 `fin_end`、`fin_floor` 贯穿 `run_backtest → StockContext → analyze_as_of`。`pytest -q` 184 项全绿；`--backtest-demo`（默认 2016）与 `--backtest-demo --fin-start 2021` 离线跑通，等级样本分布随 floor 变化（证参数生效）。
 
 ### 新增 / 修复（批量排名·回测运行时韧性）
 
