@@ -29,6 +29,7 @@ OldStockAnalysis/
 │   ├── charts.py            # 估值走势图（matplotlib/plotly）+ 敏感性热力图
 │   ├── report.py            # 自包含 HTML 投资报告
 │   └── backtest_charts.py   # 回测图表（净值曲线 / 水下回撤 / 等级前向收益柱状）
+├── scripts/                # 一次性数据导入：run_hikyuu_import.py（行情）/ import_hikyuu_industry_blocks.py（行业板块）
 ├── tests/                   # pytest：评分/DCF 数学/分位数/筛选逻辑/行业分桶/回测引擎与PIT截断
 ├── charts/                  # 输出图表（gitignore）
 └── reports/                 # 输出 HTML 报告（gitignore）
@@ -47,7 +48,7 @@ OldStockAnalysis/
 | 完整度置信度 | 覆盖/DCF数据/股息来源/ERP来源 → 高/中/低 标签，并作为综合评分折让因子，标注结果可信度 |
 | 批量选股 | 多标的逐只打分，按评分降序排名；基本面年份窗口可配（CLI `--years` / 仪表盘 tab 输入），进度按年份分片缓存、不跨窗口复用 |
 | 历史回测 | 验证信号历史有效性：`analyze_as_of`（时点数据注入复用四步+评分，不改算法）→ `run_backtest`（调仓/选股/日频净值/换仓成本）→ `compute_metrics`（CAGR/波动/回撤/Sharpe/Alpha/Beta）；`grade_forward_returns` 验证"A/B 是否跑赢 D"。准 PIT 截断（`data/pit.py`）避免未来函数 |
-| Web 仪表盘 | `streamlit run app.py`：交互式输入标的、查看估值图/敏感性热力图/评分；批量排名支持 Demo 与在线；**历史回测 tab**（调仓参数可调，净值/回撤/等级前向收益图 + 业绩 KPI + 持仓表 + 信号结论） |
+| Web 仪表盘 | `streamlit run app.py`：交互式输入标的、查看估值图/敏感性热力图/评分；**批量筛选 tab**（按市值区间 + 行业筛全 A 股，Hikyuu 本地库零 HTTP）；批量排名支持 Demo 与在线、**后台守护线程渐进出结果 + 断点续跑 + 进程中断后从落盘 partial 恢复**；**历史回测 tab**（调仓参数可调，净值/回撤/等级前向收益图 + 业绩 KPI + 持仓表 + 信号结论） |
 | 名称模糊搜索 | 直接输入名称（平安银行/茅台/平安）自动解析为代码；代码或名称均可，支持片段与错字近似 |
 
 ### 行业分桶
@@ -178,11 +179,11 @@ pip install pytest
 python -m pytest -q
 ```
 
-覆盖：综合评分（等级/重归一化/完整度折让/ROE 水平调制/OCF 中位数/资产负债率近 1 年）、DCF（三情景单调/wacc≤永续 guard/最小二乘 CAGR/capex 兜底/破产清算口径）、分位数 numpy/scipy 语义、筛选阈值与覆盖年数逻辑、行业分桶映射与画像完整性、年报优先取数与股息率行业化口径、**回测 PIT 截断与披露滞后 / analyze_as_of 时点一致性与 fin 窗口前移 / run_backtest 结构与换仓成本 / compute_metrics 数学（总收益·最大回撤·常数 Sharpe=None·同曲线 Beta≈1）**。
+覆盖：综合评分（等级/重归一化/完整度折让/ROE 水平调制/OCF 中位数/资产负债率近 1 年）、DCF（三情景单调/wacc≤永续 guard/最小二乘 CAGR/capex 兜底/破产清算口径）、分位数 numpy/scipy 语义、筛选阈值与覆盖年数逻辑（含股息率仅取 real 来源）、行业分桶映射与画像完整性、年报优先取数与股息率行业化口径、批量筛选行业三级兜底与一键加入回测、批量排名断点续跑 / 进程恢复、**回测 PIT 截断与披露滞后 / analyze_as_of 时点一致性与 fin 窗口前移 / run_backtest 结构与换仓成本 / compute_metrics 数学（总收益·最大回撤·常数 Sharpe=None·同曲线 Beta≈1）**。
 
 ## 依赖
 
-Python 3.9+ · akshare · pandas · numpy · matplotlib · scipy（分位数，未装自动回退 numpy）· plotly（交互图与仪表盘）· streamlit（Web 仪表盘）· pytest（测试）
+Python 3.9+ · akshare · pandas · numpy · matplotlib · scipy（分位数，未装自动回退 numpy）· plotly（交互图与仪表盘）· streamlit（Web 仪表盘）· tqdm（终端进度条，未装自动回退）· hikyuu（批量筛选本地库，未装 / 未导入自动降级）· pytest（测试）
 
 ## 已知限定
 
@@ -193,7 +194,8 @@ Python 3.9+ · akshare · pandas · numpy · matplotlib · scipy（分位数，�
 - **行业分桶**：行业归属依赖 `stock_individual_info_em`（实盘联网）；接口漂移/失败时回退"其他"桶（== 全局口径，零回归）。`SW_TO_BUCKET` 覆盖申万常见一级行业及子行业名兜底，未命中→"其他"。
 - **demo 数据**：`--demo` 与 `--batch-demo` 使用按标的派生种子的模拟数据，仅用于验证逻辑，**非真实行情**。行业归属按标的差异化（demo 清单覆盖各桶），但财务/现金流形态仍为银行股近似（000001 口径），已知简化。
 - **AkShare 版本**：实测 1.17.85；`stock_a_indicator_lg` / `stock_market_pe_lg` 等接口漂移时各函数会降级到 demo/默认值。
-- **数据缓存**：实盘股票列表（24h）、个股 PE/PB 历史（12h，按 symbol 分文件）、市场历史 PE（24h）、国债收益率历史（24h）、行业归属+总股本（720h 月级，按 symbol 分文件）已落盘到 `.cache/`（pickle；取数失败/None 不落盘，避免把瞬时失败固化成空缓存）。离线环境无法验证 TTL 命中/过期行为，缓存正确性留待联网验证。
+- **数据缓存**：实盘股票列表（24h）、个股 PE/PB 历史（12h，按 symbol 分文件）、市场历史 PE（24h）、国债收益率历史（24h）、行业归属+总股本（720h 月级，按 symbol 分文件）、批量筛选表（24h，含申万兜底映射）已落盘到 `.cache/`（pickle；取数失败/None 不落盘，避免把瞬时失败固化成空缓存）。离线环境无法验证 TTL 命中/过期行为，缓存正确性留待联网验证。
+- **批量筛选数据源**：仪表盘「批量筛选」tab 按**市值区间 + 行业**筛全 A 股，数据走 **Hikyuu 本地库**（pytdx 一次性导入后查询零 HTTP / 零 akshare；需先跑 `python scripts/run_hikyuu_import.py` 导入行情 + `python scripts/import_hikyuu_industry_blocks.py` 导入行业板块）。本地"行业板块"表仅 19/496 个板块（东财 push2 端点间歇性只拉到 19 个）→ 约 80% 股票行业为 None，由**申万一级成份股映射兜底**补齐（裸码截 `.SI` 后缀、本地优先不覆盖、端点失败降级不阻断）。hikyuu 未装 / 本地库未导入 → 返回 None（app 层提示切 Demo 或先跑导入脚本）。
 - **历史回测（三段限定，非严格历史回测）**：
   - **准 PIT**：AkShare 财务/现金流接口返回全历史且常含**重述后**数据，并非严格时点可得。回测按"截止 as-of 日 T"显式截断所有输入序列（`truncate_to_date`），财报另按"报告期 + 披露滞后 120d"过滤（`filter_reports_by_pub_lag`），但无法消除重述偏差——仅为准 PIT 口径，不得宣称"严格历史可得"。
   - **幸存者偏差**：实盘回测标的清单来自当前在市标的（`fetch_stock_list` 即如此），已退市标的不在样本内，系统性高估策略表现。`--backtest-demo` 用模拟数据无此问题但非真实行情。

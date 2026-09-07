@@ -34,6 +34,26 @@
 - **年份窗口跨启动持久化**：`.cache/dashboard_inputs.json` 新增 `batch_years`，与批量 / 历史回测标的清单一同恢复（否则重启后年份回退默认，恢复不到上次运行的那份分片结果）。
 - **测试**：新增 `tests/test_batch_years.py`（4 例）——路径分片与 `years=None` 回退、`years` 透传 ctx 且 resume 不跨窗口复用（同窗口仍复用）、`run_batch_silent` 透传 years/resume（仪表盘接线段）、仪表盘年份输入在位与落盘 / 恢复。`pytest -q` 181 项全绿；`--batch-demo --years 2018 2024` 离线跑通，筛选表年份区间随窗口变化。
 
+### 新增 / 修复（批量排名·回测运行时韧性）
+
+> 批量排名与历史回测在仪表盘在线模式逐只联网、多标的需数分钟。同步阻塞实现有两个顽疾：用户再次点击 / 切页 / 断线重连时 Streamlit 中止并从头重跑脚本（此时按钮 `False`），致本次结果丢失、却仍把上一轮 `session_state` 结果当本次渲染（"只显示前一次排名"）；批量跑到百余只后偶发进程被 Streamlit 回收、连同 `session_state` 与已完成成果一并丢失（"跑到 150 只后无结果"）。以下 5 次提交重构为后台守护线程 + 轮询 + 落盘恢复，均向后兼容（新参数可选、缺省走旧路径）。
+
+- **后台守护线程 + 轮询进度**（`app.py::_start_job` / `_poll_job`）：长任务（`run_batch_silent` / `run_backtest_silent`）在 `threading.Thread(daemon=True)` 中跑，进度写进 `session_state[job_key]` 这个普通 dict（**线程内绝不调用 `st.*` 原语**——组件句柄不能跨线程使用）；主脚本 `_poll_job` 轮询该 dict：进行中用 `st.progress` 渲染最新进度、`time.sleep(0.4)` 后 `st.rerun` 再轮询，完成则搬结果到 `session_state[result_key]`、失败则 `st.error` 报错并清 job。守护线程不随脚本中止而消失，可靠拿到本次结果；新 run 开始先 `pop("batch"/"backtest")` 清旧结果，绝不把旧结果当本次展示；按钮在 `status=="running"` 时 `disabled`。
+- **渐进出结果 + 错误态降级**：`run_batch` 新增 `on_partial(partial_df)` 回调，每只标的后把"已完成的排名快照"传出，经 `_poll_job` 写入 `session_state["batch"]` 由 `render_batch` 统一渲染——整批跑完前用户即见逐步更新的排名，后台线程异常中断时也保留已完成部分（不再"全有或全无"）。`_emit_partial` 内 `on_partial` 调用包 `try/except` 不阻断。
+- **进程重生恢复**（`app.py::_recover_batch_partial`）：`run_batch` 的 partial 每只标的后落盘 `.cache/batch_partial.pkl`（双保险，即使 app 侧写盘没跑也保住成果）；Streamlit 子进程被回收重启时，本函数从落盘 partial 读回已完成结果、置 `session_state["batch"]` + `_batch_recovered` 标志，渲染顶部"📦 已恢复上次中断前已完成的批量结果"提示。仅在"无活跃 batch_job 且本次尚未出结果"时恢复一次，避免与新启动的运行抢写。
+- **断点续跑 + 单只超时收紧**：`run_batch` 新增 `resume=True`（从 `partial_path` 读回"建议为真实建议、非出错 / 超时"的标的直接复用、仅重跑未完成项）与 `per_stock_timeout`（默认 `BATCH_PER_STOCK_TIMEOUT=60`，单只标的最长分析秒数）。单只分析改在子线程跑、`worker.join(timeout)` 后仍存活即判"超时"跳过（记 0 分 / `错误:超时`，不 `join` 死等否则违背超时语义）——避免某只标的把整批挂死、间接导致进程被回收、连带 partial 丢失。`partial_path` / `per_stock_timeout` / `resume` 均可选。
+- **修复历史回测启动失败**：`run_backtest_silent` 接收并忽略 `on_partial`（回测无 partial 语义），避免 `_start_job` 透传 `on_partial` 给 `run_backtest` 时触发 `unexpected keyword argument`。
+
+### 修复（筛选口径）
+- **股息率筛选仅取 real 来源**：`step1_fundamental` 的 `div_pass` 判定由"排除 `missing` 来源"收紧为"**仅取 `real` 来源**"（实际每股分红 / 年末股价）。`estimated_roe` / `estimated_np` 是行业 `payout_ratio` 假设凑出的估算值，可展示但不再参与筛选——避免从未分红的次新股靠行业模板被误判为"高股息"而通过筛选。估算年份在终端单独标注"仅展示不参与筛选"。
+- **修复回测崩溃**：上一项新增的估算年份标注行 `_est_mask[_est_mask]` 选出布尔值而非来源标签，`', '.join` 遇 `numpy.bool_` 抛 `TypeError` 使回测中断；已修正为直接 join 年份列表。
+
+### 新增 / 修复（批量筛选行业三级兜底）
+- **行业归属三级兜底**：Hikyuu 本地"行业板块"表仅 19/496 个板块（东财 push2 端点间歇性只拉到 19 个）→ 批量筛选表约 80% 股票行业为 `None`、桶全"其他"（即上文「新增（仪表盘）」记录的已知降级）。现新增申万一级兜底：`_fetch_sw_industry_map` 取 31 个申万一级行业、`index_component_sw` 逐行业拉成份股（**传裸码**——`_sw_bare_code` 截 `.SI` 后缀，带后缀返空 `KeyError`，实测 akshare 1.17.85），`_apply_sw_industry_fallback` 对行业为 `NaN` 的行用申万映射补齐（**本地优先、不覆盖已有**），补齐后重算"桶"列。申万端点失败 / akshare 缺函数 → `sw_map={}`，df 维持本地行业、不阻断、仅降级。申万拉取随 df 落盘 24h 缓存，进度续在 Hikyuu 取数之后（分母随阶段扩容、不倒回）。
+- **import 脚本 DB 路径**：`scripts/import_hikyuu_industry_blocks.py` 改从 `~/.hikyuu/hikyuu.ini` 解析 Hikyuu SQLite 库路径（原硬编码 `c:\stock\stock.db` 在本机不存在，致入库与查询落在两个 DB、行业板块写不进查询库）。
+- **筛选失败文案 + 一键加入回测**：`fetch_stock_screening_data` 失败时 app 层文案改为 Hikyuu 口径（"未能加载 Hikyuu 本地库（hikyuu 未安装或本地数据未导入），可先跑 `python scripts/run_hikyuu_import.py`"）；`render_batch` 新增「一键加入历史回测清单」（取评分前 N 只 → `_append_pairs_to_input` 写入 `bt_symbols`，与批量筛选加入回测、侧边栏单只「➕」同口径，跨 `st.rerun` 重放反馈）。
+- **测试**：`tests/test_dashboard_screening.py` 新增 5 例兜底单测（行业三级兜底映射 / 裸码截后缀 / 本地优先不覆盖 / 端点失败降级 / 一键加入回测去重）。`pytest -q` 181 项全绿。
+
 ---
 
 > 以下为**估值 / 评分 / 情绪口径**三组合理性优化，对应 `prompts/01_dcf_valuation.md`（A）、`prompts/02_scoring.md`（B）、`prompts/03_sentiment_fundamental.md`（C）。条目以 `(A1)`/`(B2)` 等标注回溯至提示词。
